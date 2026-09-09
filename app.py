@@ -136,8 +136,9 @@ with col2:
                     
                     # Simulación de datos extraídos (En un entorno de producción, esto conectaría al API de EE u OpenLandMap)
                     np.random.seed(42)
-                    # Usar un sigma menor para permitir variación y asegurar que haya parches de diferentes texturas
-                    sigma_val = max(3.0, min(width, height) / 10.0)
+                    # Usar un sigma constante (ej. 5.0 píxeles = ~150m) para que la complejidad 
+                    # y cantidad de texturas sea independiente del tamaño total del polígono.
+                    sigma_val = 5.0
                     
                     sand_noise = gaussian_filter(np.random.rand(height, width) * 100, sigma=sigma_val)
                     clay_noise = gaussian_filter(np.random.rand(height, width) * 100, sigma=sigma_val)
