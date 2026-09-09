@@ -216,7 +216,8 @@ with col2:
                                 icon=folium.Icon(color="green", icon="info-sign")
                             ).add_to(m_res)
                         
-                        st_folium(m_res, width=700, height=500)
+                        # Mostrar mapa sin disparar recarga de Streamlit (returned_objects=[])
+                        st_folium(m_res, width=700, height=500, returned_objects=[])
                         
                         # Descargas
                         st.markdown("### Descargar Resultados")
