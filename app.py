@@ -69,9 +69,11 @@ def get_binary_download_link(data, filename, text, mime_type):
     b64 = base64.b64encode(data).decode()
     return f'<a href="data:{mime_type};base64,{b64}" download="{filename}" style="display:inline-block;padding:8px 16px;background-color:#008CBA;color:white;text-decoration:none;border-radius:4px;margin-bottom:10px;">{text}</a>'
 
-# Initialize session state for the polygon
+# Initialize session state variables
 if 'polygon_geojson' not in st.session_state:
     st.session_state.polygon_geojson = None
+if 'procesar' not in st.session_state:
+    st.session_state.procesar = False
 
 col1, col2 = st.columns([1, 1])
 
@@ -84,6 +86,7 @@ with col1:
         geojson_data = json.load(uploaded_file)
         if 'features' in geojson_data and len(geojson_data['features']) > 0:
             st.session_state.polygon_geojson = geojson_data['features'][0]['geometry']
+            st.session_state.procesar = False
             st.success("Polígono cargado correctamente.")
 
     # Render folium map
@@ -107,17 +110,29 @@ with col1:
         poly_shape = shape(st.session_state.polygon_geojson)
         m.fit_bounds([ [poly_shape.bounds[1], poly_shape.bounds[0]], [poly_shape.bounds[3], poly_shape.bounds[2]] ])
 
-    output = st_folium(m, width=700, height=500)
+    output = st_folium(m, width=700, height=500, returned_objects=["last_active_drawing"])
 
     if output.get("last_active_drawing"):
-        st.session_state.polygon_geojson = output["last_active_drawing"]["geometry"]
-        st.success("Polígono dibujado registrado. Presiona 'Procesar Muestreo'.")
+        # Solo actualizar si es un dibujo nuevo para evitar recargas constantes
+        new_geom = output["last_active_drawing"]["geometry"]
+        if st.session_state.polygon_geojson != new_geom:
+            st.session_state.polygon_geojson = new_geom
+            st.session_state.procesar = False
+            st.success("Polígono dibujado registrado. Presiona 'Procesar Muestreo'.")
 
 with col2:
     st.subheader("2. Resultados")
-    if st.button("Procesar Muestreo", type="primary"):
+    
+    # Manejo de estado para evitar clicks múltiples y desaparición de resultados
+    def click_procesar():
+        st.session_state.procesar = True
+
+    st.button("Procesar Muestreo", type="primary", on_click=click_procesar)
+
+    if st.session_state.procesar:
         if not st.session_state.polygon_geojson:
             st.error("Por favor, dibuja o sube un polígono primero.")
+            st.session_state.procesar = False
         else:
             with st.spinner("Procesando datos de textura (OpenLandMap 30x30m)..."):
                 # Paso 1 & 2: Obtener poligono
