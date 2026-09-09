@@ -35,8 +35,9 @@ Fuente alternativa global para comparar resultados. Usa el servicio WCS de ISRIC
 3. Las fracciones se normalizan a 100% y se clasifican en textura USDA.
 4. Se crea un raster de clase textural, usando `0` solo como nodata.
 5. El raster se vectoriza y se disuelven celdas colindantes con la misma clase.
-6. Para cada zona textural se genera un punto representativo dentro del poligono.
-7. Se crean archivos descargables y una carpeta local de salida por corrida.
+6. Cada zona textural se evalua por area. Si mide hasta 85 ha, genera un punto. Si supera 85 ha, se divide en unidades de muestreo de maximo 85 ha y el remanente genera una unidad adicional.
+7. Para cada unidad de muestreo se genera un punto representativo dentro de la geometria.
+8. Se crean archivos descargables y una carpeta local de salida por corrida.
 
 ## Clases Texturales USDA
 
@@ -65,12 +66,23 @@ Cada corrida crea una carpeta en `salidas/muestreo_YYYYMMDD_HHMMSS/` con:
 - `raster_textura_250m.tif` para SoilGrids250m
 - `consistencia_intervalo_68_120m.tif` cuando se usa OpenLandMap-soildb
 - `zonas_texturales.geojson`
+- `subzonas_muestreo.geojson`
 - `puntos_muestreo.geojson`
 - `puntos_muestreo.csv`
 - `tabla_clases_textura.csv`
 - `metadata_fuente.json`
 
 La carpeta `salidas/` esta ignorada por Git para evitar subir archivos generados al repositorio.
+
+## Regla De Densidad De Muestreo
+
+La app genera un punto por cada 85 ha de una misma zona textural. El calculo se realiza por zona textural continua:
+
+- 0 a 85 ha: 1 punto
+- 85.01 a 170 ha: 2 puntos
+- 170.01 a 255 ha: 3 puntos
+
+Cuando una zona supera 85 ha, se crean subzonas internas y se usa el punto representativo de cada subzona como punto de muestreo. El CSV de puntos incluye `zona_id`, `subzona_id`, `area_zona_ha`, `area_subzona_ha` y `puntos_zona`.
 
 ## Instalacion
 

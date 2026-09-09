@@ -15,7 +15,8 @@ from rasterio.features import shapes
 from rasterio.io import MemoryFile
 from rasterio.mask import mask as raster_mask
 from rasterio.windows import from_bounds
-from shapely.geometry import mapping, shape
+from shapely.geometry import box, mapping, shape
+from shapely.ops import unary_union
 import streamlit as st
 from streamlit_folium import st_folium
 
@@ -144,6 +145,9 @@ DATA_SOURCES = {
 DEFAULT_SOURCE_KEY = "openlandmap"
 OUTPUT_ROOT = Path("salidas")
 MAX_PIXELS = 2_500_000
+MAX_SAMPLING_UNIT_HA = 85.0
+SQM_PER_HA = 10_000.0
+MAX_SAMPLING_UNIT_SQM = MAX_SAMPLING_UNIT_HA * SQM_PER_HA
 GDAL_HTTP_OPTIONS = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
     "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif",
@@ -531,15 +535,160 @@ def build_texture_zones(texture_grid, transform, crs, poly_geom):
     return zones[["zona_id", "texture_id", "Textura", "geometry"]]
 
 
+def estimate_area_crs(gdf):
+    gdf_wgs84 = gdf.to_crs("EPSG:4326") if gdf.crs else gdf.set_crs("EPSG:4326")
+    try:
+        estimated_crs = gdf_wgs84.estimate_utm_crs()
+        if estimated_crs:
+            return estimated_crs
+    except RuntimeError:
+        pass
+    return "EPSG:6933"
+
+
+def polygonal_geometry(geometry):
+    if geometry is None or geometry.is_empty:
+        return None
+    if geometry.geom_type in {"Polygon", "MultiPolygon"}:
+        return geometry
+
+    polygon_parts = [
+        part
+        for part in getattr(geometry, "geoms", [])
+        if part.geom_type in {"Polygon", "MultiPolygon"} and not part.is_empty
+    ]
+    if not polygon_parts:
+        return None
+    merged = unary_union(polygon_parts)
+    return merged if not merged.is_empty else None
+
+
+def half_plane_box(bounds, axis, cut_value):
+    minx, miny, maxx, maxy = bounds
+    width = maxx - minx
+    height = maxy - miny
+    padding = max(width, height, 1.0) * 2.0
+    if axis == "x":
+        return box(minx - padding, miny - padding, cut_value, maxy + padding)
+    return box(minx - padding, miny - padding, maxx + padding, cut_value)
+
+
+def split_off_area(geometry, target_area_sqm, axis):
+    minx, miny, maxx, maxy = geometry.bounds
+    low = minx if axis == "x" else miny
+    high = maxx if axis == "x" else maxy
+
+    if high <= low:
+        return None, geometry
+
+    cut_box = None
+    for _ in range(50):
+        mid = (low + high) / 2.0
+        candidate_box = half_plane_box(geometry.bounds, axis, mid)
+        candidate = polygonal_geometry(geometry.intersection(candidate_box))
+        candidate_area = candidate.area if candidate is not None else 0.0
+        if candidate_area < target_area_sqm:
+            low = mid
+        else:
+            high = mid
+            cut_box = candidate_box
+
+    if cut_box is None:
+        cut_box = half_plane_box(geometry.bounds, axis, high)
+
+    piece = polygonal_geometry(geometry.intersection(cut_box))
+    remainder = polygonal_geometry(geometry.difference(cut_box))
+    if piece is None or piece.area <= 0:
+        return None, geometry
+    return piece, remainder
+
+
+def subdivide_sampling_geometry(geometry):
+    area_sqm = geometry.area
+    point_count = max(1, int(np.ceil(area_sqm / MAX_SAMPLING_UNIT_SQM)))
+    if point_count == 1:
+        return [geometry]
+
+    minx, miny, maxx, maxy = geometry.bounds
+    axis = "x" if (maxx - minx) >= (maxy - miny) else "y"
+    pieces = []
+    remaining = geometry
+
+    for _ in range(point_count - 1):
+        if remaining is None or remaining.is_empty:
+            break
+        if remaining.area <= MAX_SAMPLING_UNIT_SQM:
+            break
+        piece, remaining = split_off_area(remaining, MAX_SAMPLING_UNIT_SQM, axis)
+        if piece is None:
+            break
+        pieces.append(piece)
+
+    if remaining is not None and not remaining.is_empty:
+        pieces.append(remaining)
+
+    return pieces or [geometry]
+
+
 def build_sampling_points(zones):
-    points = zones.copy()
-    points["geometry"] = points.geometry.representative_point()
-    if points.crs and points.crs.to_string() != "EPSG:4326":
-        points = points.to_crs("EPSG:4326")
+    area_crs = estimate_area_crs(zones)
+    zones_metric = zones.to_crs(area_crs) if zones.crs else zones.set_crs("EPSG:4326").to_crs(area_crs)
+    point_records = []
+    unit_records = []
+
+    for _, zone in zones_metric.iterrows():
+        zone_area_ha = zone.geometry.area / SQM_PER_HA
+        sampling_geometries = subdivide_sampling_geometry(zone.geometry)
+        points_for_zone = len(sampling_geometries)
+
+        for subzone_index, sampling_geometry in enumerate(sampling_geometries, start=1):
+            unit_area_ha = sampling_geometry.area / SQM_PER_HA
+            base_record = {
+                "zona_id": int(zone["zona_id"]),
+                "subzona_id": subzone_index,
+                "texture_id": int(zone["texture_id"]),
+                "Textura": zone["Textura"],
+                "area_zona_ha": round(zone_area_ha, 4),
+                "area_subzona_ha": round(unit_area_ha, 4),
+                "puntos_zona": points_for_zone,
+            }
+            unit_records.append({**base_record, "geometry": sampling_geometry})
+            point_records.append({**base_record, "geometry": sampling_geometry.representative_point()})
+
+    sampling_units = gpd.GeoDataFrame(unit_records, geometry="geometry", crs=area_crs)
+    points = gpd.GeoDataFrame(point_records, geometry="geometry", crs=area_crs)
+    points = points.to_crs("EPSG:4326")
+    sampling_units = sampling_units.to_crs("EPSG:4326")
     points["ID_Punto"] = np.arange(1, len(points) + 1)
+    sampling_units["ID_Unidad"] = points["ID_Punto"].to_numpy()
     points["Lon"] = points.geometry.x
     points["Lat"] = points.geometry.y
-    return points[["ID_Punto", "zona_id", "texture_id", "Textura", "Lat", "Lon", "geometry"]]
+
+    point_columns = [
+        "ID_Punto",
+        "zona_id",
+        "subzona_id",
+        "texture_id",
+        "Textura",
+        "area_zona_ha",
+        "area_subzona_ha",
+        "puntos_zona",
+        "Lat",
+        "Lon",
+        "geometry",
+    ]
+    unit_columns = [
+        "ID_Unidad",
+        "zona_id",
+        "subzona_id",
+        "texture_id",
+        "Textura",
+        "area_zona_ha",
+        "area_subzona_ha",
+        "puntos_zona",
+        "geometry",
+    ]
+    return points[point_columns], sampling_units[unit_columns]
 
 
 def next_output_dir():
@@ -578,6 +727,7 @@ def write_outputs(
     crs,
     zones,
     points,
+    sampling_units,
     pixel_count,
     source_config,
     auxiliary_rasters=None,
@@ -585,6 +735,7 @@ def write_outputs(
     output_dir = next_output_dir()
     raster_path = output_dir / f"raster_textura_{source_config['resolution_slug']}.tif"
     zones_path = output_dir / "zonas_texturales.geojson"
+    sampling_units_path = output_dir / "subzonas_muestreo.geojson"
     points_geojson_path = output_dir / "puntos_muestreo.geojson"
     points_csv_path = output_dir / "puntos_muestreo.csv"
     classes_path = output_dir / "tabla_clases_textura.csv"
@@ -602,8 +753,14 @@ def write_outputs(
 
     zones_out = zones.to_crs("EPSG:4326") if zones.crs else zones.set_crs("EPSG:4326")
     points_out = points.to_crs("EPSG:4326") if points.crs else points.set_crs("EPSG:4326")
+    sampling_units_out = (
+        sampling_units.to_crs("EPSG:4326")
+        if sampling_units.crs
+        else sampling_units.set_crs("EPSG:4326")
+    )
 
     zones_path.write_text(zones_out.to_json(), encoding="utf-8")
+    sampling_units_path.write_text(sampling_units_out.to_json(), encoding="utf-8")
     points_geojson_path.write_text(points_out.to_json(), encoding="utf-8")
     points_out.drop(columns="geometry").to_csv(points_csv_path, index=False, encoding="utf-8")
 
@@ -623,10 +780,13 @@ def write_outputs(
         "nodata_value": NODATA_CLASS,
         "valid_texture_pixels": int(np.count_nonzero(texture_grid)),
         "zone_count": int(len(zones_out)),
+        "sampling_unit_count": int(len(sampling_units_out)),
+        "max_sampling_unit_area_ha": MAX_SAMPLING_UNIT_HA,
         "point_count": int(len(points_out)),
         "outputs": {
             "raster": raster_path.name,
             "zones_geojson": zones_path.name,
+            "sampling_units_geojson": sampling_units_path.name,
             "points_geojson": points_geojson_path.name,
             "points_csv": points_csv_path.name,
             "classes_csv": classes_path.name,
@@ -635,6 +795,7 @@ def write_outputs(
     files = {
         "raster": raster_path,
         "zones_geojson": zones_path,
+        "sampling_units_geojson": sampling_units_path,
         "points_geojson": points_geojson_path,
         "points_csv": points_csv_path,
         "classes_csv": classes_path,
@@ -690,13 +851,14 @@ def process_sampling(geometry, source_key=DEFAULT_SOURCE_KEY, status_box=None):
     if status_box:
         status_box.info("Vectorizando zonas texturales y creando puntos...")
     zones = build_texture_zones(texture_grid, transform, crs, poly_geom)
-    points = build_sampling_points(zones)
+    points, sampling_units = build_sampling_points(zones)
     files, output_dir = write_outputs(
         texture_grid,
         transform,
         crs,
         zones,
         points,
+        sampling_units,
         pixel_count,
         source_config,
         auxiliary_rasters,
@@ -705,6 +867,7 @@ def process_sampling(geometry, source_key=DEFAULT_SOURCE_KEY, status_box=None):
     return {
         "zones": zones,
         "points": points,
+        "sampling_units": sampling_units,
         "files": files,
         "output_dir": output_dir,
         "valid_pixels": valid_pixels,
@@ -767,6 +930,12 @@ def render_input_map():
 def render_result_map(result):
     zones = result["zones"]
     zones_wgs84 = zones.to_crs("EPSG:4326") if zones.crs else zones.set_crs("EPSG:4326")
+    sampling_units = result["sampling_units"]
+    sampling_units_wgs84 = (
+        sampling_units.to_crs("EPSG:4326")
+        if sampling_units.crs
+        else sampling_units.set_crs("EPSG:4326")
+    )
     points = result["points"]
     center = [points["Lat"].mean(), points["Lon"].mean()]
     result_map = folium.Map(location=center, zoom_start=15, tiles=None)
@@ -786,13 +955,31 @@ def render_result_map(result):
             tooltip=f"Zona {row['zona_id']}: {row['Textura']}",
         ).add_to(result_map)
 
+    for _, row in sampling_units_wgs84.iterrows():
+        geojson = gpd.GeoSeries([row["geometry"]], crs="EPSG:4326").to_json()
+        folium.GeoJson(
+            geojson,
+            style_function=lambda feature: {
+                "fillColor": "transparent",
+                "color": "#111827",
+                "weight": 1,
+                "dashArray": "4,4",
+                "fillOpacity": 0,
+            },
+            tooltip=(
+                f"Unidad {row['ID_Unidad']} | Zona {row['zona_id']}-"
+                f"{row['subzona_id']} | {row['area_subzona_ha']} ha"
+            ),
+        ).add_to(result_map)
+
     for _, row in points.iterrows():
         folium.Marker(
             location=[row["Lat"], row["Lon"]],
             popup=(
                 f"<b>Punto {row['ID_Punto']}</b><br>"
-                f"Zona: {row['zona_id']}<br>"
-                f"Textura: {row['Textura']}"
+                f"Zona: {row['zona_id']}-{row['subzona_id']}<br>"
+                f"Textura: {row['Textura']}<br>"
+                f"Area unidad: {row['area_subzona_ha']} ha"
             ),
             icon=folium.Icon(color="green", icon="info-sign"),
         ).add_to(result_map)
@@ -807,6 +994,7 @@ def render_downloads(files, result):
     download_items = [
         (f"Raster textura {result['resolution_label']} (TIF)", "raster", "image/tiff"),
         ("Zonas texturales (GeoJSON)", "zones_geojson", "application/geo+json"),
+        ("Subzonas de muestreo (GeoJSON)", "sampling_units_geojson", "application/geo+json"),
         ("Puntos de muestreo (GeoJSON)", "points_geojson", "application/geo+json"),
         ("Puntos de muestreo (CSV)", "points_csv", "text/csv"),
         ("Tabla de clases (CSV)", "classes_csv", "text/csv"),
@@ -923,6 +1111,7 @@ def main():
                 f"Resolucion: {result['resolution_label']} | "
                 f"Pixeles validos: {result['valid_pixels']:,} | "
                 f"Zonas: {len(result['zones']):,} | "
+                f"Unidades 85 ha: {len(result['sampling_units']):,} | "
                 f"Puntos: {len(result['points']):,}"
             )
             certainty = result["auxiliary_rasters"].get("certainty_mask")
