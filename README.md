@@ -31,13 +31,14 @@ Fuente alternativa global para comparar resultados. Usa el servicio WCS de ISRIC
 ## Metodologia
 
 1. El usuario dibuja un poligono sobre el mapa satelital o sube un archivo GeoJSON.
-2. La app extrae arena, limo y arcilla desde la fuente seleccionada.
-3. Las fracciones se normalizan a 100% y se clasifican en textura USDA.
-4. Se crea un raster de clase textural, usando `0` solo como nodata.
-5. El raster se vectoriza y se disuelven celdas colindantes con la misma clase.
-6. Cada zona textural se evalua por area. Si mide hasta 85 ha, genera un punto. Si supera 85 ha, se divide en unidades de muestreo de maximo 85 ha y el remanente genera una unidad adicional.
-7. Para cada unidad de muestreo se genera un punto aleatorio dentro de la geometria.
-8. Se crean archivos descargables y una carpeta local de salida por corrida.
+2. Antes de procesar, el poligono activo se puede guardar o descargar como GeoJSON con nombre propio.
+3. La app extrae arena, limo y arcilla desde la fuente seleccionada.
+4. Las fracciones se normalizan a 100% y se clasifican en textura USDA.
+5. Se crea un raster de clase textural, usando `0` solo como nodata.
+6. El raster se vectoriza y se disuelven celdas colindantes con la misma clase.
+7. Cada zona textural se evalua por area. Si mide hasta 85 ha, genera un punto. Si supera 85 ha, se divide en unidades de muestreo de maximo 85 ha y el remanente genera una unidad adicional.
+8. Para cada unidad de muestreo se genera un punto aleatorio dentro de la geometria.
+9. Se crean archivos descargables y una carpeta local de salida por corrida.
 
 ## Clases Texturales USDA
 
@@ -73,6 +74,8 @@ Cada corrida crea una carpeta en `salidas/muestreo_YYYYMMDD_HHMMSS/` con:
 - `metadata_fuente.json`
 
 La carpeta `salidas/` esta ignorada por Git para evitar subir archivos generados al repositorio.
+
+Los poligonos guardados antes de procesar se escriben en `salidas/poligonos/NOMBRE.geojson`.
 
 ## Regla De Densidad De Muestreo
 

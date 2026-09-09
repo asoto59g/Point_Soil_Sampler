@@ -1,6 +1,8 @@
 from datetime import datetime
 from pathlib import Path
 import json
+import re
+import unicodedata
 
 import folium
 from folium.plugins import Draw
@@ -144,6 +146,7 @@ DATA_SOURCES = {
 }
 DEFAULT_SOURCE_KEY = "openlandmap"
 OUTPUT_ROOT = Path("salidas")
+SAVED_POLYGONS_DIR = OUTPUT_ROOT / "poligonos"
 MAX_PIXELS = 2_500_000
 MAX_SAMPLING_UNIT_HA = 85.0
 SQM_PER_HA = 10_000.0
@@ -184,6 +187,65 @@ def validate_polygon(geometry):
     if poly_geom.is_empty or not poly_geom.is_valid:
         raise ValueError("El poligono no es valido.")
     return poly_geom
+
+
+def sanitize_geojson_filename(raw_name):
+    name = (raw_name or "").strip().replace("\\", "/").split("/")[-1]
+    lower_name = name.lower()
+    if lower_name.endswith(".geojson"):
+        name = name[:-8]
+    elif lower_name.endswith(".json"):
+        name = name[:-5]
+
+    ascii_name = (
+        unicodedata.normalize("NFKD", name)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", ascii_name).strip("_")
+    return f"{safe_name or 'poligono'}.geojson"
+
+
+def build_polygon_geojson_bytes(geometry, polygon_name):
+    poly_geom = validate_polygon(geometry)
+    display_name = (polygon_name or "").strip() or "poligono"
+    feature_collection = {
+        "type": "FeatureCollection",
+        "name": display_name,
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {
+                    "nombre": display_name,
+                    "creado_en": datetime.now().isoformat(timespec="seconds"),
+                },
+                "geometry": mapping(poly_geom),
+            }
+        ],
+    }
+    return json.dumps(feature_collection, indent=2).encode("utf-8")
+
+
+def unique_saved_polygon_path(file_name):
+    SAVED_POLYGONS_DIR.mkdir(parents=True, exist_ok=True)
+    candidate = SAVED_POLYGONS_DIR / file_name
+    if not candidate.exists():
+        return candidate
+
+    suffix = 1
+    while True:
+        candidate = SAVED_POLYGONS_DIR / f"{Path(file_name).stem}_{suffix}.geojson"
+        if not candidate.exists():
+            return candidate
+        suffix += 1
+
+
+def save_polygon_geojson(geometry, polygon_name):
+    file_name = sanitize_geojson_filename(polygon_name)
+    payload = build_polygon_geojson_bytes(geometry, polygon_name)
+    path = unique_saved_polygon_path(file_name)
+    path.write_bytes(payload)
+    return path
 
 
 def estimate_window_pixels(dataset, poly_geom):
@@ -952,6 +1014,40 @@ def render_input_map():
     )
 
 
+def render_polygon_export_controls():
+    st.markdown("### Guardar poligono")
+    polygon_name = st.text_input(
+        "Nombre del GeoJSON",
+        value="poligono_campo",
+        key="polygon_export_name",
+    )
+
+    if not st.session_state.polygon_geojson:
+        st.info("Dibuja o sube un poligono para guardarlo como GeoJSON.")
+        return
+
+    try:
+        file_name = sanitize_geojson_filename(polygon_name)
+        payload = build_polygon_geojson_bytes(st.session_state.polygon_geojson, polygon_name)
+    except ValueError as exc:
+        st.error(f"No se pudo preparar el GeoJSON: {exc}")
+        return
+
+    save_col, download_col = st.columns(2)
+    with save_col:
+        if st.button("Guardar GeoJSON", key="save_input_polygon"):
+            saved_path = save_polygon_geojson(st.session_state.polygon_geojson, polygon_name)
+            st.success(f"Guardado en `{saved_path}`.")
+    with download_col:
+        st.download_button(
+            label="Descargar GeoJSON",
+            data=payload,
+            file_name=file_name,
+            mime="application/geo+json",
+            key="download_input_polygon",
+        )
+
+
 def render_result_map(result):
     zones = result["zones"]
     zones_wgs84 = zones.to_crs("EPSG:4326") if zones.crs else zones.set_crs("EPSG:4326")
@@ -1089,6 +1185,8 @@ def main():
                     st.success("Poligono dibujado registrado.")
                 except ValueError as exc:
                     st.error(f"El dibujo no es valido: {exc}")
+
+        render_polygon_export_controls()
 
     with col2:
         st.subheader("2. Procesar y descargar")
