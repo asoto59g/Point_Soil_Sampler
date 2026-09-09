@@ -82,7 +82,9 @@ with col1:
             st.success("Polígono cargado correctamente.")
 
     # Render folium map
-    m = folium.Map(location=[9.9281, -84.0907], zoom_start=7, tiles="cartodb satellite")
+    esri_tiles = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+    esri_attr = 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+    m = folium.Map(location=[9.9281, -84.0907], zoom_start=7, tiles=esri_tiles, attr=esri_attr)
     
     # Add draw control
     draw = folium.plugins.Draw(
@@ -183,7 +185,9 @@ with col2:
                         st.success("3️⃣ Puntos de muestreo de centroide calculados.")
                         
                         # Visualización de Resultados
-                        m_res = folium.Map(location=[centroids['Lat'].mean(), centroids['Lon'].mean()], zoom_start=15, tiles="cartodb satellite")
+                        esri_tiles = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+                        esri_attr = 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+                        m_res = folium.Map(location=[centroids['Lat'].mean(), centroids['Lon'].mean()], zoom_start=15, tiles=esri_tiles, attr=esri_attr)
                         
                         # Agregar Zonas
                         for idx, row in gdf_final_zones.iterrows():
