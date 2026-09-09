@@ -1,0 +1,16 @@
+Metodología Establecimiento Puntos de Muestreo de Suelos
+
+Objetivo:  Establecer una metodología para definir puntos de muestreo de suelos en un polígono según la textura del suelo USDA, la experiencia del desarrollador concluyo que este método es fiable y fue comprobado en varias fincas, esta seria una ubicación preliminar de puntos que debe validarse la textura en el campo.
+
+1) El dataset utilizado a nivel mundial será OpenLandMap SoilDB con resolución 30 x 30 m en https://world.soils.app/
+
+2) El software permite dibujar el polígono de interés sobre el mapa tipo satellite o subir un propio polígono tipo geojson.
+
+3) Una con el polígono el programa extraerá del dataset las variables de arena, limo y arcilla a 30 cm de profundidad y creara un raster 30 x 30 m delimitado por el polígono con los valores que corresponde a la textura en triangulo de clasificación del USDA. Primeramente, las diferentes texturas se creara una tabla de valores 1 al x numero de texturas que puedan darse y corresponda a la descripción. Este seria el primer insumo generado y cada clase tendrá un color.
+
+4) Luego este raster se vectoriza y se une celdas colindantes con el mismo valor para disminuir la cantidad de polígonos que tendría la vectorización. Este es segundo insumo que produce el programa
+
+5) Una vez definidas las grandes zonas o polígonos de clase textural, se creara un centroide que definira el punto de muestreo de esa zona, este es el tercer insumo generado que es una capa vectorial y también una capa csv descargable.
+
+Este app se subirá un repo con el nombre https://github.com/asoto59g/Point_Soil_Sampler
+Y se generara una app en streamlit
