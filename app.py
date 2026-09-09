@@ -138,9 +138,8 @@ with col2:
                     # Para garantizar que la textura sea 100% consistente geográficamente (independiente del tamaño del polígono),
                     # generamos un patrón determinista basado en las coordenadas absolutas (Longitud y Latitud).
                     cols, rows = np.meshgrid(np.arange(width), np.arange(height))
-                    xs, ys = rasterio.transform.xy(transform, rows, cols)
-                    xs = np.array(xs)
-                    ys = np.array(ys)
+                    # Al multiplicar el transform (Affine) por las matrices, preservamos exactamente la forma (height, width)
+                    xs, ys = transform * (cols + 0.5, rows + 0.5)
                     
                     # Frecuencias para crear parches de textura de tamaño realista (~150m - 300m)
                     f1, f2, f3 = 1000.0, 500.0, 200.0
