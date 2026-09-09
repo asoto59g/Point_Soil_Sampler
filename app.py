@@ -156,11 +156,24 @@ with col2:
                     # Al multiplicar el transform (Affine) por las matrices, preservamos exactamente la forma (height, width)
                     xs, ys = transform * (cols + 0.5, rows + 0.5)
                     
-                    # Frecuencias para crear parches de textura de tamaño realista (~150m - 300m)
-                    f1, f2, f3 = 1000.0, 500.0, 200.0
+                    # Generamos un patrón pseudo-aleatorio natural (estilo Perlin Noise) usando suma de armónicos.
+                    # Esto asegura que las "manchas" sean de forma orgánica y 100% consistentes en las mismas coordenadas.
+                    sand_base = np.zeros_like(xs)
+                    clay_base = np.zeros_like(xs)
                     
-                    sand_base = np.sin(xs * f1) + np.cos(ys * f1) + np.sin(xs * f2 + ys * f2) + np.cos(xs * f3 - ys * f3)
-                    clay_base = np.cos(xs * f1 + 1.5) + np.sin(ys * f1 + 1.5) + np.cos(xs * f2 - ys * f2) + np.sin(xs * f3 + ys * f3)
+                    np.random.seed(42) # Semilla fija para que la ecuación del terreno mundial sea siempre la misma
+                    for _ in range(12): # Sumar 12 ondas para crear un relieve orgánico complejo
+                        fx = np.random.uniform(200, 1200)
+                        fy = np.random.uniform(200, 1200)
+                        px = np.random.uniform(0, 2*np.pi)
+                        py = np.random.uniform(0, 2*np.pi)
+                        sand_base += np.sin(xs * fx + px) * np.cos(ys * fy + py)
+                        
+                        fx = np.random.uniform(200, 1200)
+                        fy = np.random.uniform(200, 1200)
+                        px = np.random.uniform(0, 2*np.pi)
+                        py = np.random.uniform(0, 2*np.pi)
+                        clay_base += np.sin(xs * fx + px) * np.cos(ys * fy + py)
                     
                     # Estirar el contraste para asegurar variedad de clases de textura (desde 10% hasta 80%)
                     sand_base = (sand_base - sand_base.min()) / (sand_base.max() - sand_base.min() + 1e-6) * 70 + 10
