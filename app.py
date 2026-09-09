@@ -131,9 +131,15 @@ with col2:
                     
                     # Simulación de datos extraídos (En un entorno de producción, esto conectaría al API de EE u OpenLandMap)
                     np.random.seed(42)
-                    # Generar campos suavizados para texturas realistas en el área
-                    sand_base = gaussian_filter(np.random.rand(height, width) * 100, sigma=min(width, height)/3.0)
-                    clay_base = gaussian_filter(np.random.rand(height, width) * 100, sigma=min(width, height)/3.0)
+                    # Usar un sigma menor para permitir variación y asegurar que haya parches de diferentes texturas
+                    sigma_val = max(3.0, min(width, height) / 10.0)
+                    
+                    sand_noise = gaussian_filter(np.random.rand(height, width) * 100, sigma=sigma_val)
+                    clay_noise = gaussian_filter(np.random.rand(height, width) * 100, sigma=sigma_val)
+                    
+                    # Estirar el contraste para asegurar variedad de clases de textura (desde 10% hasta 80%)
+                    sand_base = (sand_noise - sand_noise.min()) / (sand_noise.max() - sand_noise.min() + 1e-6) * 70 + 10
+                    clay_base = (clay_noise - clay_noise.min()) / (clay_noise.max() - clay_noise.min() + 1e-6) * 70 + 10
                     
                     total = sand_base + clay_base + 10 # Asegurar al menos 10% limo
                     sand_grid = (sand_base / total) * 100
