@@ -4,8 +4,9 @@ from streamlit_folium import st_folium
 import geopandas as gpd
 from shapely.geometry import shape, Point, Polygon, MultiPolygon
 import rasterio
-from rasterio.features import shapes
+from rasterio.features import shapes, geometry_mask
 from rasterio.transform import from_origin
+from rasterio.io import MemoryFile
 import numpy as np
 import pandas as pd
 from scipy.ndimage import gaussian_filter
@@ -63,6 +64,10 @@ def get_usda_texture(sand, clay):
 def get_download_link(data, filename, text, mime_type):
     b64 = base64.b64encode(data.encode()).decode()
     return f'<a href="data:{mime_type};base64,{b64}" download="{filename}" style="display:inline-block;padding:8px 16px;background-color:#4CAF50;color:white;text-decoration:none;border-radius:4px;margin-bottom:10px;">{text}</a>'
+
+def get_binary_download_link(data, filename, text, mime_type):
+    b64 = base64.b64encode(data).decode()
+    return f'<a href="data:{mime_type};base64,{b64}" download="{filename}" style="display:inline-block;padding:8px 16px;background-color:#008CBA;color:white;text-decoration:none;border-radius:4px;margin-bottom:10px;">{text}</a>'
 
 # Initialize session state for the polygon
 if 'polygon_geojson' not in st.session_state:
@@ -151,7 +156,26 @@ with col2:
                         for j in range(width):
                             texture_grid[i, j] = get_usda_texture(sand_grid[i, j], clay_grid[i, j])
                     
-                    st.success("1️⃣ Raster de textura analizado.")
+                    # Enmascarar el grid con la geometría del polígono exacto (fuera del polígono será 0 / nodata)
+                    mask = geometry_mask([poly_geom], transform=transform, invert=True, out_shape=(height, width))
+                    texture_grid = np.where(mask, texture_grid, 0)
+                    
+                    # Guardar el raster en memoria para descargarlo luego
+                    with MemoryFile() as memfile:
+                        with memfile.open(
+                            driver='GTiff',
+                            height=height,
+                            width=width,
+                            count=1,
+                            dtype=rasterio.int16,
+                            crs='EPSG:4326',
+                            transform=transform,
+                            nodata=0
+                        ) as dataset:
+                            dataset.write(texture_grid, 1)
+                        raster_bytes = memfile.read()
+                    
+                    st.success("1️⃣ Raster de textura analizado y generado.")
                     
                     # Paso 4: Vectorizar y unir polígonos colindantes
                     shapes_gen = shapes(texture_grid, transform=transform)
@@ -227,6 +251,9 @@ with col2:
                         
                         # Descargas
                         st.markdown("### Descargar Resultados")
+                        
+                        # TIF del Raster
+                        st.markdown(get_binary_download_link(raster_bytes, "raster_textura_30x30m.tif", "📥 Descargar Raster 30x30m (TIF)", "image/tiff"), unsafe_allow_html=True)
                         
                         # GeoJSON de Puntos
                         pts_geojson = centroids[['Textura', 'geometry']].to_json()
