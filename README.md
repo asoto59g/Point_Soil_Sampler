@@ -36,7 +36,7 @@ Fuente alternativa global para comparar resultados. Usa el servicio WCS de ISRIC
 4. Se crea un raster de clase textural, usando `0` solo como nodata.
 5. El raster se vectoriza y se disuelven celdas colindantes con la misma clase.
 6. Cada zona textural se evalua por area. Si mide hasta 85 ha, genera un punto. Si supera 85 ha, se divide en unidades de muestreo de maximo 85 ha y el remanente genera una unidad adicional.
-7. Para cada unidad de muestreo se genera un punto representativo dentro de la geometria.
+7. Para cada unidad de muestreo se genera un punto aleatorio dentro de la geometria.
 8. Se crean archivos descargables y una carpeta local de salida por corrida.
 
 ## Clases Texturales USDA
@@ -82,7 +82,9 @@ La app genera un punto por cada 85 ha de una misma zona textural. El calculo se 
 - 85.01 a 170 ha: 2 puntos
 - 170.01 a 255 ha: 3 puntos
 
-Cuando una zona supera 85 ha, se crean subzonas internas y se usa el punto representativo de cada subzona como punto de muestreo. El CSV de puntos incluye `zona_id`, `subzona_id`, `area_zona_ha`, `area_subzona_ha` y `puntos_zona`.
+Cuando una zona supera 85 ha, se crean subzonas internas y se genera un punto aleatorio dentro de cada subzona. Las zonas que no superan 85 ha tambien usan un punto aleatorio dentro de su geometria. El CSV de puntos incluye `zona_id`, `subzona_id`, `area_zona_ha`, `area_subzona_ha`, `puntos_zona` y `metodo_punto`.
+
+Cada vez que se ejecuta nuevamente el procesamiento se generan nuevas ubicaciones aleatorias para mejorar la variabilidad de futuras muestras, manteniendo las mismas zonas texturales y la regla de densidad.
 
 ## Instalacion
 

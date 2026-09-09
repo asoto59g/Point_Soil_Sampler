@@ -15,7 +15,7 @@ from rasterio.features import shapes
 from rasterio.io import MemoryFile
 from rasterio.mask import mask as raster_mask
 from rasterio.windows import from_bounds
-from shapely.geometry import box, mapping, shape
+from shapely.geometry import Point, box, mapping, shape
 from shapely.ops import unary_union
 import streamlit as st
 from streamlit_folium import st_folium
@@ -630,9 +630,30 @@ def subdivide_sampling_geometry(geometry):
     return pieces or [geometry]
 
 
+def random_point_in_geometry(geometry, rng, max_attempts=10_000):
+    minx, miny, maxx, maxy = geometry.bounds
+    if maxx <= minx or maxy <= miny:
+        return geometry.representative_point(), "representativo_respaldo"
+
+    attempts = 0
+    batch_size = 256
+    while attempts < max_attempts:
+        remaining = min(batch_size, max_attempts - attempts)
+        xs = rng.uniform(minx, maxx, remaining)
+        ys = rng.uniform(miny, maxy, remaining)
+        for x_coord, y_coord in zip(xs, ys):
+            point = Point(float(x_coord), float(y_coord))
+            if geometry.covers(point):
+                return point, "aleatorio_en_unidad"
+        attempts += remaining
+
+    return geometry.representative_point(), "representativo_respaldo"
+
+
 def build_sampling_points(zones):
     area_crs = estimate_area_crs(zones)
     zones_metric = zones.to_crs(area_crs) if zones.crs else zones.set_crs("EPSG:4326").to_crs(area_crs)
+    rng = np.random.default_rng()
     point_records = []
     unit_records = []
 
@@ -652,8 +673,11 @@ def build_sampling_points(zones):
                 "area_subzona_ha": round(unit_area_ha, 4),
                 "puntos_zona": points_for_zone,
             }
+            point_geometry, point_method = random_point_in_geometry(sampling_geometry, rng)
             unit_records.append({**base_record, "geometry": sampling_geometry})
-            point_records.append({**base_record, "geometry": sampling_geometry.representative_point()})
+            point_records.append(
+                {**base_record, "metodo_punto": point_method, "geometry": point_geometry}
+            )
 
     sampling_units = gpd.GeoDataFrame(unit_records, geometry="geometry", crs=area_crs)
     points = gpd.GeoDataFrame(point_records, geometry="geometry", crs=area_crs)
@@ -673,6 +697,7 @@ def build_sampling_points(zones):
         "area_zona_ha",
         "area_subzona_ha",
         "puntos_zona",
+        "metodo_punto",
         "Lat",
         "Lon",
         "geometry",
@@ -979,7 +1004,8 @@ def render_result_map(result):
                 f"<b>Punto {row['ID_Punto']}</b><br>"
                 f"Zona: {row['zona_id']}-{row['subzona_id']}<br>"
                 f"Textura: {row['Textura']}<br>"
-                f"Area unidad: {row['area_subzona_ha']} ha"
+                f"Area unidad: {row['area_subzona_ha']} ha<br>"
+                f"Metodo: {row['metodo_punto']}"
             ),
             icon=folium.Icon(color="green", icon="info-sign"),
         ).add_to(result_map)
