@@ -189,6 +189,17 @@ def validate_polygon(geometry):
     return poly_geom
 
 
+def iter_polygon_parts(geometry):
+    if geometry is None or geometry.is_empty:
+        return
+    if geometry.geom_type == "Polygon":
+        yield geometry
+        return
+    if geometry.geom_type in {"MultiPolygon", "GeometryCollection"}:
+        for part in geometry.geoms:
+            yield from iter_polygon_parts(part)
+
+
 def sanitize_geojson_filename(raw_name):
     name = (raw_name or "").strip().replace("\\", "/").split("/")[-1]
     lower_name = name.lower()
@@ -562,6 +573,7 @@ def build_texture_zones(texture_grid, transform, crs, poly_geom):
         texture_grid,
         mask=texture_grid > 0,
         transform=transform,
+        connectivity=4,
     )
 
     polygons = []
@@ -590,10 +602,25 @@ def build_texture_zones(texture_grid, transform, crs, poly_geom):
         raise RuntimeError("No quedaron zonas texturales dentro del poligono.")
 
     clipped["texture_id"] = clipped["texture_id"].astype(int)
-    dissolved = clipped.dissolve(by="texture_id", as_index=False)
-    zones = dissolved.explode(index_parts=False).reset_index(drop=True)
+    zone_records = []
+    for _, row in clipped.iterrows():
+        texture_id = int(row["texture_id"])
+        for part in iter_polygon_parts(row.geometry):
+            if part.is_empty or part.area <= 0:
+                continue
+            zone_records.append(
+                {
+                    "texture_id": texture_id,
+                    "Textura": USDA_CLASSES[texture_id],
+                    "geometry": part,
+                }
+            )
+
+    if not zone_records:
+        raise RuntimeError("No quedaron poligonos texturales validos dentro del poligono.")
+
+    zones = gpd.GeoDataFrame(zone_records, geometry="geometry", crs=texture_gdf.crs)
     zones["zona_id"] = np.arange(1, len(zones) + 1)
-    zones["Textura"] = zones["texture_id"].map(USDA_CLASSES)
     return zones[["zona_id", "texture_id", "Textura", "geometry"]]
 
 

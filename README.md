@@ -35,8 +35,8 @@ Fuente alternativa global para comparar resultados. Usa el servicio WCS de ISRIC
 3. La app extrae arena, limo y arcilla desde la fuente seleccionada.
 4. Las fracciones se normalizan a 100% y se clasifican en textura USDA.
 5. Se crea un raster de clase textural, usando `0` solo como nodata.
-6. El raster se vectoriza y se disuelven celdas colindantes con la misma clase.
-7. Cada zona textural se evalua por area. Si mide hasta 85 ha, genera un punto. Si supera 85 ha, se divide en unidades de muestreo de maximo 85 ha y el remanente genera una unidad adicional.
+6. El raster se vectoriza en poligonos continuos de clase textural.
+7. Cada poligono continuo de clase textural se evalua por area. Si mide hasta 85 ha, genera un punto. Si supera 85 ha, se divide en unidades de muestreo de maximo 85 ha y el remanente genera una unidad adicional.
 8. Para cada unidad de muestreo se genera un punto aleatorio dentro de la geometria.
 9. Se crean archivos descargables y una carpeta local de salida por corrida.
 
@@ -79,7 +79,7 @@ Los poligonos guardados antes de procesar se escriben en `salidas/poligonos/NOMB
 
 ## Regla De Densidad De Muestreo
 
-La app genera un punto por cada 85 ha de una misma zona textural. El calculo se realiza por zona textural continua:
+La app genera un punto por cada 85 ha de una misma zona textural. El calculo se realiza por cada poligono continuo de clase textural, no sobre el poligono completo de entrada ni sumando poligonos separados de la misma clase:
 
 - 0 a 85 ha: 1 punto
 - 85.01 a 170 ha: 2 puntos
