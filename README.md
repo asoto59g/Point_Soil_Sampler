@@ -1,37 +1,87 @@
-# Point_Soil_Sampler
+# Point Soil Sampler
+
 https://pointsoilsampler-nzqz5m3sbjzuxxmwyappkrb.streamlit.app/
 
-Aplicación Streamlit para establecer una metodología de puntos de muestreo de suelos en un polígono basándose en la textura del suelo USDA.
+Aplicacion Streamlit para definir puntos preliminares de muestreo de suelos dentro de un poligono, usando textura USDA calculada desde fuentes reales de arena, limo y arcilla. La app no genera datos simulados: si una fuente remota no responde, el procesamiento se detiene.
 
-## Metodología Implementada
-1) **Dataset de Origen**: Permite elegir entre OpenLandMap-soildb (arena, limo y arcilla; 30 m) y SoilGrids250m / ISRIC WCS (arena, limo y arcilla; 250 m).
-2) **Entrada de Datos**: Permite al usuario dibujar un polígono de interés sobre un mapa satelital o subir un archivo GeoJSON personalizado.
-3) **Raster de Textura**: Extrae variables reales de textura desde la fuente seleccionada y crea un raster donde cada píxel corresponde a una clase textural USDA (1-12). Si la fuente real no responde, la app detiene el proceso en lugar de inventar datos.
-4) **Vectorización y Unión**: Vectoriza el raster, uniendo automáticamente las celdas colindantes que comparten el mismo valor de textura para formar polígonos o "zonas" contiguas, minimizando la cantidad total de geometrías.
-5) **Generación de Puntos**: Calcula el centroide representativo de cada zona de textura identificada. Estos puntos aseguran caer siempre dentro del polígono respectivo y sirven como los puntos preliminares de muestreo en campo.
+## Fuentes De Datos
 
-## Archivos de salida
+### OpenLandMap-soildb 120 m
+
+Fuente predeterminada. Usa COGs globales de OpenLandMap-soildb para arena, limo y arcilla:
+
+- Periodo: 2020-2022
+- Profundidad: 0-30 cm
+- Resolucion: 120 m
+- CRS: EPSG:4326
+- Estadisticos usados: `mean`, `p0.16` y `p0.84`
+- Intervalo de prediccion: 68%, mayor que el umbral solicitado de 60%
+
+La textura USDA principal se calcula con las capas `mean`. La app tambien lee `p0.16` y `p0.84` y exporta una mascara `consistencia_intervalo_68_120m.tif`: valor `1` cuando la clase USDA calculada con la media coincide con la clase calculada desde ambos extremos del intervalo, y `0` cuando no coincide o no hay dato. Esta mascara es un indicador derivado de consistencia, no una probabilidad oficial de clase.
+
+### SoilGrids250m / ISRIC WCS
+
+Fuente alternativa global para comparar resultados. Usa el servicio WCS de ISRIC SoilGrids:
+
+- Variables: `sand`, `silt`, `clay`
+- Profundidades: 0-5 cm, 5-15 cm y 15-30 cm
+- Resolucion: 250 m
+- Metodo 0-30 cm: promedio ponderado por espesor de cada intervalo
+
+## Metodologia
+
+1. El usuario dibuja un poligono sobre el mapa satelital o sube un archivo GeoJSON.
+2. La app extrae arena, limo y arcilla desde la fuente seleccionada.
+3. Las fracciones se normalizan a 100% y se clasifican en textura USDA.
+4. Se crea un raster de clase textural, usando `0` solo como nodata.
+5. El raster se vectoriza y se disuelven celdas colindantes con la misma clase.
+6. Para cada zona textural se genera un punto representativo dentro del poligono.
+7. Se crean archivos descargables y una carpeta local de salida por corrida.
+
+## Clases Texturales USDA
+
+La tabla exportada contiene exactamente 12 clases texturales:
+
+| ID | Clase |
+| --- | --- |
+| 1 | Arenosa (Sand) |
+| 2 | Arenosa-franca (Loamy sand) |
+| 3 | Franco-arenosa (Sandy loam) |
+| 4 | Franca (Loam) |
+| 5 | Franco-limosa (Silt loam) |
+| 6 | Limosa (Silt) |
+| 7 | Franco-areno-arcillosa (Sandy clay loam) |
+| 8 | Franco-arcillosa (Clay loam) |
+| 9 | Franco-limo-arcillosa (Silty clay loam) |
+| 10 | Areno-arcillosa (Sandy clay) |
+| 11 | Limo-arcillosa (Silty clay) |
+| 12 | Arcillosa (Clay) |
+
+## Archivos De Salida
+
 Cada corrida crea una carpeta en `salidas/muestreo_YYYYMMDD_HHMMSS/` con:
 
-- `raster_textura_30x30m.tif`
+- `raster_textura_120m.tif` para OpenLandMap-soildb
+- `raster_textura_250m.tif` para SoilGrids250m
+- `consistencia_intervalo_68_120m.tif` cuando se usa OpenLandMap-soildb
 - `zonas_texturales.geojson`
 - `puntos_muestreo.geojson`
 - `puntos_muestreo.csv`
 - `tabla_clases_textura.csv`
 - `metadata_fuente.json`
 
-La tabla de clases exportada contiene solo las 12 clases texturales. En el raster, el valor `0` queda reservado como nodata.
+La carpeta `salidas/` esta ignorada por Git para evitar subir archivos generados al repositorio.
 
-## Fuentes disponibles
-- **OpenLandMap-soildb 30 m**: fuente predeterminada. Usa COGs globales de arena, limo y arcilla para 0-30 cm.
-- **SoilGrids250m / ISRIC WCS**: fuente alternativa global. Usa las capas `sand`, `silt` y `clay` de SoilGrids en 0-5, 5-15 y 15-30 cm, con promedio ponderado para producir 0-30 cm. Es una fuente independiente, pero su resolución espacial es 250 m.
+## Instalacion
 
-## Instalación
 ```bash
 pip install -r requirements.txt
 ```
 
-## Ejecución
+## Ejecucion
+
 ```bash
 streamlit run app.py
 ```
+
+La app requiere conexion a internet para leer `s3.opengeohub.org` y `maps.isric.org`.

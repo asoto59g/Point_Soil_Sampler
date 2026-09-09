@@ -56,21 +56,36 @@ USDA_COLORS = {
 OPENLANDMAP_FRACTION_COGS = {
     "sand": {
         "label": "arena",
-        "url": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/sand.tot_iso.11277.2020.wpct_m_30m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+        "urls": {
+            "mean": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/sand.tot_iso.11277.2020.wpct_m_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+            "p16": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/sand.tot_iso.11277.2020.wpct_p16_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+            "p84": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/sand.tot_iso.11277.2020.wpct_p84_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+        },
     },
     "silt": {
         "label": "limo",
-        "url": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/silt.tot_iso.11277.2020.wpct_m_30m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+        "urls": {
+            "mean": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/silt.tot_iso.11277.2020.wpct_m_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+            "p16": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/silt.tot_iso.11277.2020.wpct_p16_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+            "p84": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/silt.tot_iso.11277.2020.wpct_p84_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+        },
     },
     "clay": {
         "label": "arcilla",
-        "url": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/clay.tot_iso.11277.2020.wpct_m_30m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+        "urls": {
+            "mean": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/clay.tot_iso.11277.2020.wpct_m_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+            "p16": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/clay.tot_iso.11277.2020.wpct_p16_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+            "p84": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/clay.tot_iso.11277.2020.wpct_p84_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+        },
     },
 }
 
+OPENLANDMAP_INTERVAL_CONFIDENCE_PERCENT = 68
+OPENLANDMAP_MIN_CERTAINTY_PERCENT = 60
 OPENLANDMAP_SOURCE_DESCRIPTION = (
     "OpenLandMap-soildb COGs: fracciones arena/limo/arcilla, media "
-    "2020-2022, profundidad 0-30 cm, resolucion 30 m, EPSG:4326."
+    "2020-2022, profundidad 0-30 cm, resolucion 120 m, EPSG:4326, "
+    "con intervalos p0.16/p0.84 de 68% (>60%)."
 )
 OPENLANDMAP_CATALOG_URL = (
     "https://raw.githubusercontent.com/openlandmap/soildb/main/tables/"
@@ -102,12 +117,14 @@ SOILGRIDS_DEPTH_INTERVALS = [
 SOILGRIDS_LAYER_TEMPLATE = "https://maps.isric.org/mapserv?map=/map/{property}.map"
 DATA_SOURCES = {
     "openlandmap": {
-        "name": "OpenLandMap-soildb 30 m",
+        "name": "OpenLandMap-soildb 120 m (PI 68%)",
         "description": OPENLANDMAP_SOURCE_DESCRIPTION,
         "catalog": OPENLANDMAP_CATALOG_URL,
         "layers": OPENLANDMAP_FRACTION_COGS,
-        "resolution_label": "30 m",
-        "resolution_slug": "30m",
+        "resolution_label": "120 m",
+        "resolution_slug": "120m",
+        "certainty_threshold": OPENLANDMAP_MIN_CERTAINTY_PERCENT,
+        "interval_confidence": OPENLANDMAP_INTERVAL_CONFIDENCE_PERCENT,
         "network_host": "s3.opengeohub.org",
     },
     "soilgrids": {
@@ -200,6 +217,7 @@ def check_pixel_limit(pixel_count, width, height):
 
 def read_openlandmap_fraction_rasters(poly_geom, status_box=None):
     arrays = {}
+    intervals = {}
     out_transform = None
     out_crs = None
     out_shape = None
@@ -207,42 +225,89 @@ def read_openlandmap_fraction_rasters(poly_geom, status_box=None):
 
     with rasterio.Env(**GDAL_HTTP_OPTIONS):
         for key, layer in OPENLANDMAP_FRACTION_COGS.items():
-            if status_box:
-                status_box.info(f"Leyendo {layer['label']} desde OpenLandMap-soildb...")
+            intervals[key] = {}
 
-            try:
-                with rasterio.open(layer["url"]) as src:
-                    if pixel_count is None:
-                        pixel_count, width, height = estimate_window_pixels(src, poly_geom)
-                        check_pixel_limit(pixel_count, width, height)
-
-                    data, transform = raster_mask(
-                        src,
-                        [mapping(poly_geom)],
-                        crop=True,
-                        filled=False,
-                        all_touched=True,
+            for stat_key, url in layer["urls"].items():
+                if status_box:
+                    status_box.info(
+                        f"Leyendo {layer['label']} {stat_key} desde OpenLandMap-soildb 120 m..."
                     )
-                    band = np.ma.masked_invalid(data[0].astype("float32"))
 
-                    if out_shape is None:
-                        out_shape = band.shape
-                        out_transform = transform
-                        out_crs = src.crs
-                    elif band.shape != out_shape or not transform.almost_equals(out_transform):
-                        raise RuntimeError(
-                            "Los rasters de arena, limo y arcilla no estan alineados."
+                try:
+                    with rasterio.open(url) as src:
+                        if pixel_count is None:
+                            pixel_count, width, height = estimate_window_pixels(src, poly_geom)
+                            check_pixel_limit(pixel_count, width, height)
+
+                        data, transform = raster_mask(
+                            src,
+                            [mapping(poly_geom)],
+                            crop=True,
+                            filled=False,
+                            all_touched=True,
                         )
+                        band = np.ma.masked_invalid(data[0].astype("float32"))
 
-                    arrays[key] = band
-            except RasterioIOError as exc:
-                raise RuntimeError(
-                    "No se pudo abrir el raster remoto de "
-                    f"{layer['label']}. Revisa la conexion a internet o el acceso a "
-                    f"s3.opengeohub.org. Detalle tecnico: {exc}"
-                ) from exc
+                        if out_shape is None:
+                            out_shape = band.shape
+                            out_transform = transform
+                            out_crs = src.crs
+                        elif band.shape != out_shape or not transform.almost_equals(out_transform):
+                            raise RuntimeError(
+                                "Los rasters de arena, limo y arcilla no estan alineados."
+                            )
 
-    return arrays, out_transform, out_crs, pixel_count
+                        intervals[key][stat_key] = band
+                except RasterioIOError as exc:
+                    raise RuntimeError(
+                        "No se pudo abrir el raster remoto de "
+                        f"{layer['label']} {stat_key}. Revisa la conexion a internet o "
+                        f"el acceso a s3.opengeohub.org. Detalle tecnico: {exc}"
+                    ) from exc
+
+            arrays[key] = intervals[key]["mean"]
+
+    mean_texture, _ = classify_usda_texture(
+        intervals["sand"]["mean"],
+        intervals["silt"]["mean"],
+        intervals["clay"]["mean"],
+    )
+    lower_texture, _ = classify_usda_texture(
+        intervals["sand"]["p16"],
+        intervals["silt"]["p16"],
+        intervals["clay"]["p16"],
+    )
+    upper_texture, _ = classify_usda_texture(
+        intervals["sand"]["p84"],
+        intervals["silt"]["p84"],
+        intervals["clay"]["p84"],
+    )
+    valid = mean_texture > 0
+    stable = valid & (lower_texture == mean_texture) & (upper_texture == mean_texture)
+    stable_pct = float(np.count_nonzero(stable) / np.count_nonzero(valid) * 100.0) if np.any(valid) else 0.0
+    auxiliary_rasters = {
+        "certainty_mask": {
+            "filename": "consistencia_intervalo_68_120m.tif",
+            "array": stable.astype("uint8"),
+            "dtype": "uint8",
+            "nodata": 0,
+            "description": (
+                "Mascara derivada: 1 cuando la clase USDA calculada con media "
+                "coincide con las clases calculadas usando p0.16 y p0.84. "
+                "El intervalo fuente es 68% (>60%); no es una probabilidad "
+                "oficial de clase."
+            ),
+            "summary": {
+                "interval_confidence_percent": OPENLANDMAP_INTERVAL_CONFIDENCE_PERCENT,
+                "minimum_requested_certainty_percent": OPENLANDMAP_MIN_CERTAINTY_PERCENT,
+                "valid_pixels": int(np.count_nonzero(valid)),
+                "stable_pixels": int(np.count_nonzero(stable)),
+                "stable_pixels_percent": round(stable_pct, 2),
+            },
+        }
+    }
+
+    return arrays, out_transform, out_crs, pixel_count, auxiliary_rasters
 
 
 def estimate_projected_pixels(bounds, res):
@@ -359,7 +424,7 @@ def read_soilgrids_fraction_rasters(poly_geom, status_box=None):
                 f"maps.isric.org. Detalle tecnico: {exc}"
             ) from exc
 
-    return arrays, out_transform, out_crs, pixel_count
+    return arrays, out_transform, out_crs, pixel_count, {}
 
 
 def read_soil_fraction_rasters(poly_geom, source_key, status_box=None):
@@ -489,7 +554,34 @@ def next_output_dir():
     return output_dir
 
 
-def write_outputs(texture_grid, transform, crs, zones, points, pixel_count, source_config):
+def write_single_band_raster(path, array, transform, crs, dtype, nodata, tags=None):
+    profile = {
+        "driver": "GTiff",
+        "height": array.shape[0],
+        "width": array.shape[1],
+        "count": 1,
+        "dtype": dtype,
+        "crs": crs or "EPSG:4326",
+        "transform": transform,
+        "nodata": nodata,
+        "compress": "lzw",
+    }
+    with rasterio.open(path, "w", **profile) as dst:
+        dst.write(array.astype(dtype), 1)
+        if tags:
+            dst.update_tags(**tags)
+
+
+def write_outputs(
+    texture_grid,
+    transform,
+    crs,
+    zones,
+    points,
+    pixel_count,
+    source_config,
+    auxiliary_rasters=None,
+):
     output_dir = next_output_dir()
     raster_path = output_dir / f"raster_textura_{source_config['resolution_slug']}.tif"
     zones_path = output_dir / "zonas_texturales.geojson"
@@ -498,20 +590,15 @@ def write_outputs(texture_grid, transform, crs, zones, points, pixel_count, sour
     classes_path = output_dir / "tabla_clases_textura.csv"
     metadata_path = output_dir / "metadata_fuente.json"
 
-    raster_profile = {
-        "driver": "GTiff",
-        "height": texture_grid.shape[0],
-        "width": texture_grid.shape[1],
-        "count": 1,
-        "dtype": "int16",
-        "crs": crs or "EPSG:4326",
-        "transform": transform,
-        "nodata": 0,
-        "compress": "lzw",
-    }
-    with rasterio.open(raster_path, "w", **raster_profile) as dst:
-        dst.write(texture_grid, 1)
-        dst.update_tags(source=source_config["description"])
+    write_single_band_raster(
+        raster_path,
+        texture_grid,
+        transform,
+        crs,
+        "int16",
+        NODATA_CLASS,
+        tags={"source": source_config["description"]},
+    )
 
     zones_out = zones.to_crs("EPSG:4326") if zones.crs else zones.set_crs("EPSG:4326")
     points_out = points.to_crs("EPSG:4326") if points.crs else points.set_crs("EPSG:4326")
@@ -545,22 +632,46 @@ def write_outputs(texture_grid, transform, crs, zones, points, pixel_count, sour
             "classes_csv": classes_path.name,
         },
     }
-    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-
-    return {
+    files = {
         "raster": raster_path,
         "zones_geojson": zones_path,
         "points_geojson": points_geojson_path,
         "points_csv": points_csv_path,
         "classes_csv": classes_path,
         "metadata": metadata_path,
-    }, output_dir
+    }
+
+    auxiliary_rasters = auxiliary_rasters or {}
+    auxiliary_metadata = {}
+    for key, raster in auxiliary_rasters.items():
+        path = output_dir / raster["filename"]
+        write_single_band_raster(
+            path,
+            raster["array"],
+            transform,
+            crs,
+            raster["dtype"],
+            raster["nodata"],
+            tags={"source": source_config["description"], "description": raster["description"]},
+        )
+        files[key] = path
+        metadata["outputs"][key] = path.name
+        auxiliary_metadata[key] = {
+            "description": raster["description"],
+            "summary": raster.get("summary", {}),
+        }
+    if auxiliary_metadata:
+        metadata["auxiliary_rasters"] = auxiliary_metadata
+
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    return files, output_dir
 
 
 def process_sampling(geometry, source_key=DEFAULT_SOURCE_KEY, status_box=None):
     source_config = get_source_config(source_key)
     poly_geom = validate_polygon(geometry)
-    fractions, transform, crs, pixel_count = read_soil_fraction_rasters(
+    fractions, transform, crs, pixel_count, auxiliary_rasters = read_soil_fraction_rasters(
         poly_geom,
         source_key,
         status_box,
@@ -588,6 +699,7 @@ def process_sampling(geometry, source_key=DEFAULT_SOURCE_KEY, status_box=None):
         points,
         pixel_count,
         source_config,
+        auxiliary_rasters,
     )
 
     return {
@@ -600,6 +712,7 @@ def process_sampling(geometry, source_key=DEFAULT_SOURCE_KEY, status_box=None):
         "source_key": source_key,
         "source_name": source_config["name"],
         "resolution_label": source_config["resolution_label"],
+        "auxiliary_rasters": auxiliary_rasters,
     }
 
 
@@ -689,16 +802,23 @@ def render_result_map(result):
     st_folium(result_map, width=700, height=500, returned_objects=[])
 
 
-def render_downloads(files):
+def render_downloads(files, result):
     st.markdown("### Archivos generados")
-    for label, key, mime_type in [
-        ("Raster textura 30 m (TIF)", "raster", "image/tiff"),
+    download_items = [
+        (f"Raster textura {result['resolution_label']} (TIF)", "raster", "image/tiff"),
         ("Zonas texturales (GeoJSON)", "zones_geojson", "application/geo+json"),
         ("Puntos de muestreo (GeoJSON)", "points_geojson", "application/geo+json"),
         ("Puntos de muestreo (CSV)", "points_csv", "text/csv"),
         ("Tabla de clases (CSV)", "classes_csv", "text/csv"),
         ("Metadata de fuente (JSON)", "metadata", "application/json"),
-    ]:
+    ]
+    if "certainty_mask" in files:
+        download_items.insert(
+            1,
+            ("Consistencia intervalo 68% (TIF)", "certainty_mask", "image/tiff"),
+        )
+
+    for label, key, mime_type in download_items:
         path = files[key]
         st.download_button(
             label=label,
@@ -725,7 +845,7 @@ def main():
         "textura USDA calculada desde fracciones reales de arena, limo y arcilla."
     )
     st.caption(
-        "Fuentes reales disponibles: OpenLandMap-soildb 30 m y SoilGrids250m / "
+        "Fuentes reales disponibles: OpenLandMap-soildb 120 m y SoilGrids250m / "
         "ISRIC WCS. No se generan datos simulados."
     )
 
@@ -805,8 +925,16 @@ def main():
                 f"Zonas: {len(result['zones']):,} | "
                 f"Puntos: {len(result['points']):,}"
             )
+            certainty = result["auxiliary_rasters"].get("certainty_mask")
+            if certainty:
+                summary = certainty["summary"]
+                st.write(
+                    "Consistencia intervalo 68%: "
+                    f"{summary['stable_pixels']:,} de {summary['valid_pixels']:,} pixeles "
+                    f"({summary['stable_pixels_percent']}%)."
+                )
             render_result_map(result)
-            render_downloads(result["files"])
+            render_downloads(result["files"], result)
 
 
 if __name__ == "__main__":
