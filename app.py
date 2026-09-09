@@ -135,17 +135,22 @@ with col2:
                     transform = from_origin(minx, maxy, res, res)
                     
                     # Simulación de datos extraídos (En un entorno de producción, esto conectaría al API de EE u OpenLandMap)
-                    np.random.seed(42)
-                    # Usar un sigma constante (ej. 5.0 píxeles = ~150m) para que la complejidad 
-                    # y cantidad de texturas sea independiente del tamaño total del polígono.
-                    sigma_val = 5.0
+                    # Para garantizar que la textura sea 100% consistente geográficamente (independiente del tamaño del polígono),
+                    # generamos un patrón determinista basado en las coordenadas absolutas (Longitud y Latitud).
+                    cols, rows = np.meshgrid(np.arange(width), np.arange(height))
+                    xs, ys = rasterio.transform.xy(transform, rows, cols)
+                    xs = np.array(xs)
+                    ys = np.array(ys)
                     
-                    sand_noise = gaussian_filter(np.random.rand(height, width) * 100, sigma=sigma_val)
-                    clay_noise = gaussian_filter(np.random.rand(height, width) * 100, sigma=sigma_val)
+                    # Frecuencias para crear parches de textura de tamaño realista (~150m - 300m)
+                    f1, f2, f3 = 1000.0, 500.0, 200.0
+                    
+                    sand_base = np.sin(xs * f1) + np.cos(ys * f1) + np.sin(xs * f2 + ys * f2) + np.cos(xs * f3 - ys * f3)
+                    clay_base = np.cos(xs * f1 + 1.5) + np.sin(ys * f1 + 1.5) + np.cos(xs * f2 - ys * f2) + np.sin(xs * f3 + ys * f3)
                     
                     # Estirar el contraste para asegurar variedad de clases de textura (desde 10% hasta 80%)
-                    sand_base = (sand_noise - sand_noise.min()) / (sand_noise.max() - sand_noise.min() + 1e-6) * 70 + 10
-                    clay_base = (clay_noise - clay_noise.min()) / (clay_noise.max() - clay_noise.min() + 1e-6) * 70 + 10
+                    sand_base = (sand_base - sand_base.min()) / (sand_base.max() - sand_base.min() + 1e-6) * 70 + 10
+                    clay_base = (clay_base - clay_base.min()) / (clay_base.max() - clay_base.min() + 1e-6) * 70 + 10
                     
                     total = sand_base + clay_base + 10 # Asegurar al menos 10% limo
                     sand_grid = (sand_base / total) * 100
