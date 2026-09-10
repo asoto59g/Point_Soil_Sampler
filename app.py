@@ -2,7 +2,11 @@ from datetime import datetime
 from pathlib import Path
 import json
 import re
+import threading
+import time
+import traceback
 import unicodedata
+import uuid
 
 import folium
 from folium.plugins import Draw
@@ -173,6 +177,7 @@ OUTPUT_ROOT = Path("salidas")
 SAVED_POLYGONS_DIR = OUTPUT_ROOT / "poligonos"
 MAX_PIXELS = 2_500_000
 SQM_PER_HA = 10_000.0
+RECENT_JOB_LIMIT = 5
 GDAL_HTTP_OPTIONS = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
     "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif",
@@ -180,6 +185,126 @@ GDAL_HTTP_OPTIONS = {
     "VSI_CACHE": "TRUE",
     "VSI_CACHE_SIZE": "50000000",
 }
+
+
+@st.cache_resource
+def processing_registry():
+    return {"lock": threading.RLock(), "jobs": {}}
+
+
+def timestamp_label():
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def job_snapshot(job):
+    return {
+        key: value
+        for key, value in job.items()
+        if key != "thread"
+    }
+
+
+def update_processing_job_in_registry(registry, job_id, **updates):
+    with registry["lock"]:
+        job = registry["jobs"].get(job_id)
+        if not job:
+            return
+        job.update(updates)
+        job["updated_at"] = timestamp_label()
+
+
+def update_processing_job(job_id, **updates):
+    update_processing_job_in_registry(processing_registry(), job_id, **updates)
+
+
+class BackgroundStatus:
+    def __init__(self, registry, job_id):
+        self.registry = registry
+        self.job_id = job_id
+
+    def info(self, message):
+        update_processing_job_in_registry(self.registry, self.job_id, message=message)
+
+
+def run_processing_job(registry, job_id, geometry, source_key):
+    status = BackgroundStatus(registry, job_id)
+    try:
+        result = process_sampling(geometry, source_key=source_key, status_box=status)
+    except Exception as exc:
+        update_processing_job_in_registry(
+            registry,
+            job_id,
+            state="error",
+            message=str(exc),
+            error=str(exc),
+            traceback=traceback.format_exc(),
+            finished_at=timestamp_label(),
+        )
+        return
+
+    update_processing_job_in_registry(
+        registry,
+        job_id,
+        state="complete",
+        message="Muestreo procesado y archivos creados.",
+        result=result,
+        finished_at=timestamp_label(),
+    )
+
+
+def start_processing_job(geometry, source_key):
+    source_config = get_source_config(source_key)
+    job_id = uuid.uuid4().hex[:12]
+    job_geometry = json.loads(json.dumps(geometry))
+    job = {
+        "id": job_id,
+        "source_key": source_key,
+        "source_name": source_config["name"],
+        "state": "running",
+        "message": "Iniciando procesamiento...",
+        "error": None,
+        "traceback": None,
+        "result": None,
+        "started_at": timestamp_label(),
+        "updated_at": timestamp_label(),
+        "finished_at": None,
+    }
+    registry = processing_registry()
+    thread = threading.Thread(
+        target=run_processing_job,
+        args=(registry, job_id, job_geometry, source_key),
+        name=f"soil-sampler-job-{job_id}",
+        daemon=True,
+    )
+    job["thread"] = thread
+
+    with registry["lock"]:
+        registry["jobs"][job_id] = job
+    thread.start()
+    return job_id
+
+
+def get_processing_job(job_id):
+    if not job_id:
+        return None
+    registry = processing_registry()
+    with registry["lock"]:
+        job = registry["jobs"].get(job_id)
+        return job_snapshot(job) if job else None
+
+
+def list_processing_jobs(limit=RECENT_JOB_LIMIT):
+    registry = processing_registry()
+    with registry["lock"]:
+        jobs = [job_snapshot(job) for job in registry["jobs"].values()]
+    jobs.sort(key=lambda job: job.get("started_at") or "", reverse=True)
+    return jobs[:limit]
+
+
+def rerun_app():
+    rerun = getattr(st, "rerun", None) or getattr(st, "experimental_rerun", None)
+    if rerun:
+        rerun()
 
 
 def extract_geometry(geojson_data):
@@ -1097,6 +1222,81 @@ def render_downloads(files, result):
         )
 
 
+def load_completed_job_result(job):
+    result = job.get("result")
+    if not result:
+        return False
+    st.session_state.result = result
+    st.session_state.processing_job_id = None
+    return True
+
+
+def render_current_processing_job():
+    job = get_processing_job(st.session_state.get("processing_job_id"))
+    if not job:
+        return False
+
+    state = job["state"]
+    if state == "running":
+        st.info(job["message"])
+        st.caption(
+            f"Proceso en segundo plano: {job['source_name']} | "
+            f"Inicio: {job['started_at']} | Ultima actualizacion: {job['updated_at']}"
+        )
+        if st.button("Actualizar estado", key="refresh_processing_job"):
+            rerun_app()
+        time.sleep(2)
+        rerun_app()
+        return True
+
+    if state == "complete":
+        if load_completed_job_result(job):
+            st.success(job["message"])
+        else:
+            st.error("El proceso termino, pero no se encontro el resultado en memoria.")
+        return False
+
+    if state == "error":
+        st.session_state.processing_job_id = None
+        st.session_state.result = None
+        st.error(job["message"])
+        with st.expander("Detalle tecnico"):
+            st.code(job.get("traceback") or job["message"])
+        return False
+
+    return False
+
+
+def render_recent_processing_jobs():
+    jobs = list_processing_jobs()
+    if not jobs:
+        return
+
+    current_job_id = st.session_state.get("processing_job_id")
+    visible_jobs = [job for job in jobs if job["id"] != current_job_id]
+    if not visible_jobs:
+        return
+
+    running_jobs = [job for job in visible_jobs if job["state"] == "running"]
+    with st.expander("Procesos recientes", expanded=bool(running_jobs)):
+        for job in visible_jobs:
+            st.write(
+                f"`{job['id']}` | {job['source_name']} | {job['state']} | "
+                f"Inicio: {job['started_at']} | {job['message']}"
+            )
+            if job["state"] == "complete":
+                if st.button("Cargar resultado", key=f"load_job_{job['id']}"):
+                    if load_completed_job_result(job):
+                        rerun_app()
+            elif job["state"] == "running":
+                if st.button("Seguir proceso", key=f"follow_job_{job['id']}"):
+                    st.session_state.processing_job_id = job["id"]
+                    rerun_app()
+            elif job["state"] == "error":
+                with st.expander(f"Detalle tecnico {job['id']}"):
+                    st.code(job.get("traceback") or job["message"])
+
+
 def main():
     st.set_page_config(page_title="Soil Point Sampler", layout="wide")
 
@@ -1106,6 +1306,8 @@ def main():
         st.session_state.result = None
     if "source_key" not in st.session_state:
         st.session_state.source_key = DEFAULT_SOURCE_KEY
+    if "processing_job_id" not in st.session_state:
+        st.session_state.processing_job_id = None
 
     st.title("Metodologia Establecimiento Puntos de Muestreo de Suelos")
     st.markdown(
@@ -1177,24 +1379,25 @@ def main():
             "responde, el proceso se detiene en lugar de inventar datos."
         )
 
-        if st.button("Procesar muestreo", type="primary"):
+        current_job = get_processing_job(st.session_state.processing_job_id)
+        job_running = bool(current_job and current_job["state"] == "running")
+        if st.button("Procesar muestreo", type="primary", disabled=job_running):
             if not st.session_state.polygon_geojson:
                 st.error("Dibuja o sube un poligono primero.")
             else:
-                status_box = st.empty()
                 try:
-                    with st.spinner(f"Procesando textura desde {source_config['name']}..."):
-                        st.session_state.result = process_sampling(
-                            st.session_state.polygon_geojson,
-                            source_key=st.session_state.source_key,
-                            status_box=status_box,
-                        )
-                    status_box.empty()
-                    st.success("Muestreo procesado y archivos creados.")
-                except Exception as exc:
-                    status_box.empty()
+                    validate_polygon(st.session_state.polygon_geojson)
+                    st.session_state.processing_job_id = start_processing_job(
+                        st.session_state.polygon_geojson,
+                        st.session_state.source_key,
+                    )
                     st.session_state.result = None
+                    rerun_app()
+                except Exception as exc:
                     st.error(str(exc))
+
+        render_current_processing_job()
+        render_recent_processing_jobs()
 
         if st.session_state.result:
             result = st.session_state.result

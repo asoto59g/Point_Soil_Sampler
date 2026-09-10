@@ -93,6 +93,8 @@ streamlit run app.py
 
 La app requiere conexion a internet para leer `s3.opengeohub.org`, `maps.isric.org` y, en el modo experimental, `planetarycomputer.microsoft.com`.
 
+Las corridas largas se ejecutan como procesos en segundo plano dentro del servidor Streamlit. Si el navegador se desconecta temporalmente, por ejemplo al apagar la pantalla, el proceso puede continuar mientras el equipo y el servidor Streamlit sigan activos.
+
 ## Ejemplo Visual
 
 ![Mapa conceptual de zonas texturales y puntos de muestreo](docs/example-map.svg)
@@ -151,6 +153,7 @@ Cada punto se ubica en el centroide del poligono textural correspondiente. El CS
 - Humedad, rastrojo, sombra, residuos de cultivo, nubosidad y cobertura vegetal pueden sesgar la estimacion.
 - El modo Sentinel-2 + WoSIS depende de que existan suficientes perfiles WoSIS completos y pixeles Sentinel-2 de suelo descubierto.
 - Las capas remotas pueden cambiar, quedar temporalmente fuera de servicio o limitar respuestas.
+- En ejecucion local, el equipo no debe entrar en suspension durante corridas Sentinel-2 largas; apagar solo la pantalla no deberia detener el job si el servidor Streamlit sigue activo.
 - Para uso operativo, conviene comparar OpenLandMap/SoilGrids/Sentinel-WoSIS y revisar incertidumbre o consistencia exportada.
 
 ## Roadmap
