@@ -31,12 +31,23 @@ SENTINEL_TARGET_RESOLUTION_M = 20
 SENTINEL_CLOUD_COVER_LT = 80
 SENTINEL_MIN_WOSIS_SAMPLES = 30
 SENTINEL_WOSIS_BUFFER_KM = 250
+SENTINEL_MAX_TRAINING_ITEMS = 80
+SENTINEL_MAX_PREDICTION_ITEMS = 60
+SENTINEL_MIN_TRAINING_ITEMS = 20
+SENTINEL_TRAINING_TARGET_VALID_SAMPLES = 60
+SENTINEL_MIN_PREDICTION_ITEMS = 20
+SENTINEL_TARGET_BARE_PIXEL_PERCENT = 90.0
+SENTINEL_MAX_ITEM_FAILURES = 12
 SENTINEL_RF_TREES = 300
 SENTINEL_RF_RANDOM_STATE = 42
 SENTINEL_GDAL_OPTIONS = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
     "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.TIF",
     "GDAL_HTTP_MULTIRANGE": "YES",
+    "GDAL_HTTP_CONNECTTIMEOUT": "20",
+    "GDAL_HTTP_TIMEOUT": "90",
+    "GDAL_HTTP_MAX_RETRY": "2",
+    "GDAL_HTTP_RETRY_DELAY": "2",
     "VSI_CACHE": "TRUE",
     "VSI_CACHE_SIZE": "50000000",
 }
@@ -427,16 +438,62 @@ def fetch_wosis_texture_samples(poly_geom, status_box=None):
     return samples.reset_index(drop=True)
 
 
-def search_sentinel_items(bounds, status_box=None, purpose="modelo"):
+def sentinel_item_cloud_cover(item):
+    try:
+        return float(item.properties.get("eo:cloud_cover", np.inf))
+    except (TypeError, ValueError):
+        return np.inf
+
+
+def select_sentinel_items(items, max_items, status_box=None, purpose="modelo"):
+    if not max_items or len(items) <= max_items:
+        items.sort(key=lambda item: item.properties.get("datetime") or "")
+        return items
+
+    selected = sorted(
+        items,
+        key=lambda item: (
+            sentinel_item_cloud_cover(item),
+            item.properties.get("datetime") or "",
+        ),
+    )[:max_items]
+    selected.sort(key=lambda item: item.properties.get("datetime") or "")
+    update_status(
+        status_box,
+        "Sentinel-2 devolvio "
+        f"{len(items):,} escenas para {purpose}; se usaran las "
+        f"{len(selected):,} de menor nubosidad para mantener la corrida acotada.",
+    )
+    return selected
+
+
+def raise_if_too_many_sentinel_failures(failed_items, phase, exc):
+    if len(failed_items) < SENTINEL_MAX_ITEM_FAILURES:
+        return
+    item_id, detail = failed_items[-1]
+    raise RuntimeError(
+        f"Demasiadas escenas Sentinel-2 fallaron durante {phase} "
+        f"({len(failed_items)} fallos). Ultima escena: {item_id}. "
+        f"Detalle tecnico: {detail}"
+    ) from exc
+
+
+def search_sentinel_items(bounds, status_box=None, purpose="modelo", max_items=None):
     modules = require_experimental_dependencies()
     pystac_client = modules["pystac_client"]
     planetary_computer = modules["planetary_computer"]
 
     datetime_range = sentinel_datetime_range()
+    max_items_message = (
+        f"; se priorizaran hasta {max_items:,} escenas de menor nubosidad"
+        if max_items
+        else ""
+    )
     update_status(
         status_box,
-        "Buscando todas las escenas Sentinel-2 L2A disponibles para "
-        f"{purpose} ({datetime_range}, nubosidad escena < {SENTINEL_CLOUD_COVER_LT}%)...",
+        "Buscando escenas Sentinel-2 L2A disponibles para "
+        f"{purpose} ({datetime_range}, nubosidad escena < "
+        f"{SENTINEL_CLOUD_COVER_LT}%{max_items_message})...",
     )
     catalog = pystac_client.Client.open(
         SENTINEL_STAC_URL,
@@ -455,7 +512,7 @@ def search_sentinel_items(bounds, status_box=None, purpose="modelo"):
             "Planetary Computer no devolvio escenas Sentinel-2 L2A para el area. "
             "El modelo experimental se detiene."
         )
-    return items
+    return select_sentinel_items(items, max_items, status_box, purpose)
 
 
 def item_asset_href(item, logical_name):
@@ -550,7 +607,12 @@ def bare_soil_mask_and_score(features, scl):
 def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_500_000):
     grid = build_prediction_grid(poly_geom, max_pixels)
     bounds = tuple(float(value) for value in poly_geom.bounds)
-    items = search_sentinel_items(bounds, status_box, purpose="prediccion del poligono")
+    items = search_sentinel_items(
+        bounds,
+        status_box,
+        purpose="prediccion del poligono",
+        max_items=SENTINEL_MAX_PREDICTION_ITEMS,
+    )
 
     shape = (grid["height"], grid["width"])
     best_score = np.full(shape, -np.inf, dtype="float32")
@@ -559,83 +621,104 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
         feature_name: np.full(shape, np.nan, dtype="float32")
         for feature_name in SENTINEL_FEATURE_NAMES
     }
+    failed_items = []
+    processed_items = 0
 
     with rasterio.Env(**SENTINEL_GDAL_OPTIONS):
         for index, item in enumerate(items, start=1):
-            update_status(status_box, f"Componiendo suelo descubierto Sentinel-2 {index:,}/{len(items):,}...")
-            bands = {
-                "blue": reflectance(
+            bare_pixels = int(np.count_nonzero(np.isfinite(best_score) & grid["mask"]))
+            bare_percent = bare_pixels / max(np.count_nonzero(grid["mask"]), 1) * 100.0
+            update_status(
+                status_box,
+                "Componiendo suelo descubierto Sentinel-2 "
+                f"{index:,}/{len(items):,} escenas; pixeles con suelo descubierto "
+                f"{bare_percent:.1f}%.",
+            )
+            try:
+                bands = {
+                    "blue": reflectance(
+                        read_asset_grid(
+                            item_asset_href(item, "blue"),
+                            grid["crs"],
+                            grid["transform"],
+                            grid["width"],
+                            grid["height"],
+                            Resampling.bilinear,
+                        )
+                    ),
+                    "green": reflectance(
+                        read_asset_grid(
+                            item_asset_href(item, "green"),
+                            grid["crs"],
+                            grid["transform"],
+                            grid["width"],
+                            grid["height"],
+                            Resampling.bilinear,
+                        )
+                    ),
+                    "red": reflectance(
+                        read_asset_grid(
+                            item_asset_href(item, "red"),
+                            grid["crs"],
+                            grid["transform"],
+                            grid["width"],
+                            grid["height"],
+                            Resampling.bilinear,
+                        )
+                    ),
+                    "nir": reflectance(
+                        read_asset_grid(
+                            item_asset_href(item, "nir"),
+                            grid["crs"],
+                            grid["transform"],
+                            grid["width"],
+                            grid["height"],
+                            Resampling.bilinear,
+                        )
+                    ),
+                    "swir1": reflectance(
+                        read_asset_grid(
+                            item_asset_href(item, "swir1"),
+                            grid["crs"],
+                            grid["transform"],
+                            grid["width"],
+                            grid["height"],
+                            Resampling.bilinear,
+                        )
+                    ),
+                    "swir2": reflectance(
+                        read_asset_grid(
+                            item_asset_href(item, "swir2"),
+                            grid["crs"],
+                            grid["transform"],
+                            grid["width"],
+                            grid["height"],
+                            Resampling.bilinear,
+                        )
+                    ),
+                }
+                scl = np.ma.filled(
                     read_asset_grid(
-                        item_asset_href(item, "blue"),
+                        item_asset_href(item, "scl"),
                         grid["crs"],
                         grid["transform"],
                         grid["width"],
                         grid["height"],
-                        Resampling.bilinear,
-                    )
-                ),
-                "green": reflectance(
-                    read_asset_grid(
-                        item_asset_href(item, "green"),
-                        grid["crs"],
-                        grid["transform"],
-                        grid["width"],
-                        grid["height"],
-                        Resampling.bilinear,
-                    )
-                ),
-                "red": reflectance(
-                    read_asset_grid(
-                        item_asset_href(item, "red"),
-                        grid["crs"],
-                        grid["transform"],
-                        grid["width"],
-                        grid["height"],
-                        Resampling.bilinear,
-                    )
-                ),
-                "nir": reflectance(
-                    read_asset_grid(
-                        item_asset_href(item, "nir"),
-                        grid["crs"],
-                        grid["transform"],
-                        grid["width"],
-                        grid["height"],
-                        Resampling.bilinear,
-                    )
-                ),
-                "swir1": reflectance(
-                    read_asset_grid(
-                        item_asset_href(item, "swir1"),
-                        grid["crs"],
-                        grid["transform"],
-                        grid["width"],
-                        grid["height"],
-                        Resampling.bilinear,
-                    )
-                ),
-                "swir2": reflectance(
-                    read_asset_grid(
-                        item_asset_href(item, "swir2"),
-                        grid["crs"],
-                        grid["transform"],
-                        grid["width"],
-                        grid["height"],
-                        Resampling.bilinear,
-                    )
-                ),
-            }
-            scl = np.ma.filled(
-                read_asset_grid(
-                    item_asset_href(item, "scl"),
-                    grid["crs"],
-                    grid["transform"],
-                    grid["width"],
-                    grid["height"],
-                    Resampling.nearest,
-                ),
-                -1,
-            ).astype("int16")
+                        Resampling.nearest,
+                    ),
+                    -1,
+                ).astype("int16")
+            except Exception as exc:
+                failed_items.append((item.id, str(exc)))
+                update_status(
+                    status_box,
+                    "Se omitio una escena Sentinel-2 por error de lectura "
+                    f"({len(failed_items):,}/{SENTINEL_MAX_ITEM_FAILURES:,} fallos).",
+                )
+                raise_if_too_many_sentinel_failures(failed_items, "la prediccion", exc)
+                continue
+
+            processed_items += 1
             features = derive_sentinel_features(bands)
             bare_mask, score = bare_soil_mask_and_score(features, scl)
             bare_mask &= grid["mask"]
@@ -645,6 +728,19 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
                 best_score[update_mask] = score[update_mask]
                 for feature_name in SENTINEL_FEATURE_NAMES:
                     feature_arrays[feature_name][update_mask] = features[feature_name][update_mask]
+
+            bare_pixels = int(np.count_nonzero(np.isfinite(best_score) & grid["mask"]))
+            bare_percent = bare_pixels / max(np.count_nonzero(grid["mask"]), 1) * 100.0
+            if (
+                processed_items >= SENTINEL_MIN_PREDICTION_ITEMS
+                and bare_percent >= SENTINEL_TARGET_BARE_PIXEL_PERCENT
+            ):
+                update_status(
+                    status_box,
+                    "Compuesto Sentinel-2 completo con "
+                    f"{bare_percent:.1f}% de pixeles de suelo descubierto.",
+                )
+                break
 
     valid_bare = np.isfinite(best_score) & grid["mask"]
     if not np.any(valid_bare):
@@ -658,7 +754,8 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
     summary = {
         "sentinel_collection": SENTINEL_COLLECTION,
         "sentinel_datetime": sentinel_datetime_range(),
-        "sentinel_items_used": len(items),
+        "sentinel_items_used": int(processed_items),
+        "sentinel_items_failed": int(len(failed_items)),
         "target_resolution_m": SENTINEL_TARGET_RESOLUTION_M,
         "cloud_cover_scene_threshold_percent": SENTINEL_CLOUD_COVER_LT,
         "aoi_pixels": int(np.count_nonzero(grid["mask"])),
@@ -687,26 +784,55 @@ def read_asset_samples(href, points_wgs84):
 
 def extract_training_features_from_sentinel(samples, status_box=None):
     bounds = tuple(float(value) for value in samples.total_bounds)
-    items = search_sentinel_items(bounds, status_box, purpose="entrenamiento WoSIS")
+    items = search_sentinel_items(
+        bounds,
+        status_box,
+        purpose="entrenamiento WoSIS",
+        max_items=SENTINEL_MAX_TRAINING_ITEMS,
+    )
     best_score = np.full(len(samples), -np.inf, dtype="float32")
     feature_values = {
         feature_name: np.full(len(samples), np.nan, dtype="float32")
         for feature_name in SENTINEL_FEATURE_NAMES
     }
     bare_observation_count = np.zeros(len(samples), dtype="uint16")
+    failed_items = []
+    processed_items = 0
+    target_valid_samples = min(
+        len(samples),
+        max(SENTINEL_MIN_WOSIS_SAMPLES, SENTINEL_TRAINING_TARGET_VALID_SAMPLES),
+    )
 
     with rasterio.Env(**SENTINEL_GDAL_OPTIONS):
         for index, item in enumerate(items, start=1):
-            update_status(status_box, f"Extrayendo Sentinel-2 en perfiles WoSIS {index:,}/{len(items):,}...")
-            bands = {
-                "blue": reflectance(read_asset_samples(item_asset_href(item, "blue"), samples)),
-                "green": reflectance(read_asset_samples(item_asset_href(item, "green"), samples)),
-                "red": reflectance(read_asset_samples(item_asset_href(item, "red"), samples)),
-                "nir": reflectance(read_asset_samples(item_asset_href(item, "nir"), samples)),
-                "swir1": reflectance(read_asset_samples(item_asset_href(item, "swir1"), samples)),
-                "swir2": reflectance(read_asset_samples(item_asset_href(item, "swir2"), samples)),
-            }
-            scl = read_asset_samples(item_asset_href(item, "scl"), samples).astype("int16")
+            valid_so_far = int(np.count_nonzero(np.isfinite(best_score)))
+            update_status(
+                status_box,
+                "Extrayendo Sentinel-2 para entrenamiento "
+                f"{index:,}/{len(items):,} escenas; perfiles validos "
+                f"{valid_so_far:,}/{len(samples):,}.",
+            )
+            try:
+                bands = {
+                    "blue": reflectance(read_asset_samples(item_asset_href(item, "blue"), samples)),
+                    "green": reflectance(read_asset_samples(item_asset_href(item, "green"), samples)),
+                    "red": reflectance(read_asset_samples(item_asset_href(item, "red"), samples)),
+                    "nir": reflectance(read_asset_samples(item_asset_href(item, "nir"), samples)),
+                    "swir1": reflectance(read_asset_samples(item_asset_href(item, "swir1"), samples)),
+                    "swir2": reflectance(read_asset_samples(item_asset_href(item, "swir2"), samples)),
+                }
+                scl = read_asset_samples(item_asset_href(item, "scl"), samples).astype("int16")
+            except Exception as exc:
+                failed_items.append((item.id, str(exc)))
+                update_status(
+                    status_box,
+                    "Se omitio una escena Sentinel-2 por error de lectura "
+                    f"({len(failed_items):,}/{SENTINEL_MAX_ITEM_FAILURES:,} fallos).",
+                )
+                raise_if_too_many_sentinel_failures(failed_items, "el entrenamiento", exc)
+                continue
+
+            processed_items += 1
             features = derive_sentinel_features(bands)
             bare_mask, score = bare_soil_mask_and_score(features, scl)
             bare_observation_count[bare_mask] = np.minimum(
@@ -718,6 +844,18 @@ def extract_training_features_from_sentinel(samples, status_box=None):
                 best_score[update_mask] = score[update_mask]
                 for feature_name in SENTINEL_FEATURE_NAMES:
                     feature_values[feature_name][update_mask] = features[feature_name][update_mask]
+
+            valid_so_far = int(np.count_nonzero(np.isfinite(best_score)))
+            if (
+                processed_items >= SENTINEL_MIN_TRAINING_ITEMS
+                and valid_so_far >= target_valid_samples
+            ):
+                update_status(
+                    status_box,
+                    "Entrenamiento Sentinel-2 listo con "
+                    f"{valid_so_far:,} perfiles WoSIS validos.",
+                )
+                break
 
     feature_frame = pd.DataFrame(feature_values)
     valid = np.isfinite(best_score)
@@ -735,7 +873,8 @@ def extract_training_features_from_sentinel(samples, status_box=None):
     summary = {
         "wosis_complete_profiles": int(len(samples)),
         "training_profiles_with_bare_sentinel": int(len(valid_samples)),
-        "training_sentinel_items_used": int(len(items)),
+        "training_sentinel_items_used": int(processed_items),
+        "training_sentinel_items_failed": int(len(failed_items)),
         "mean_bare_observations_per_training_profile": round(
             float(np.mean(bare_observation_count[valid])),
             2,
