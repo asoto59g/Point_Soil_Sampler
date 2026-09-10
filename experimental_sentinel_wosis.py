@@ -21,7 +21,7 @@ from rasterio.features import geometry_mask
 from rasterio.transform import from_origin
 from rasterio.vrt import WarpedVRT
 from rasterio.warp import transform as transform_coordinates
-from shapely.geometry import mapping
+from shapely.geometry import mapping, shape
 
 
 SENTINEL_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
@@ -38,6 +38,7 @@ SENTINEL_TRAINING_TARGET_VALID_SAMPLES = 60
 SENTINEL_MIN_PREDICTION_ITEMS = 20
 SENTINEL_TARGET_BARE_PIXEL_PERCENT = 90.0
 SENTINEL_MAX_ITEM_FAILURES = 12
+SENTINEL_CLEAR_SCL_CLASSES = (4, 5, 7)
 SENTINEL_RF_TREES = 300
 SENTINEL_RF_RANDOM_STATE = 42
 SENTINEL_GDAL_OPTIONS = {
@@ -445,24 +446,113 @@ def sentinel_item_cloud_cover(item):
         return np.inf
 
 
+def sentinel_item_datetime(item):
+    return item.properties.get("datetime") or ""
+
+
+def sentinel_item_group_key(item):
+    return (
+        item.properties.get("s2:mgrs_tile")
+        or item.properties.get("grid:code")
+        or item.id.rsplit("_", 1)[-1]
+    )
+
+
 def select_sentinel_items(items, max_items, status_box=None, purpose="modelo"):
     if not max_items or len(items) <= max_items:
-        items.sort(key=lambda item: item.properties.get("datetime") or "")
+        items.sort(key=sentinel_item_datetime)
         return items
 
     selected = sorted(
         items,
         key=lambda item: (
             sentinel_item_cloud_cover(item),
-            item.properties.get("datetime") or "",
+            sentinel_item_datetime(item),
         ),
     )[:max_items]
-    selected.sort(key=lambda item: item.properties.get("datetime") or "")
+    selected.sort(key=sentinel_item_datetime)
     update_status(
         status_box,
         "Sentinel-2 devolvio "
         f"{len(items):,} escenas para {purpose}; se usaran las "
         f"{len(selected):,} de menor nubosidad para mantener la corrida acotada.",
+    )
+    return selected
+
+
+def sentinel_item_coverage_count(item, point_geometries):
+    try:
+        item_geometry = shape(item.geometry)
+    except Exception:
+        return 0
+    return int(point_geometries.intersects(item_geometry).sum())
+
+
+def select_training_sentinel_items(items, samples, max_items, status_box=None):
+    if not max_items or len(items) <= max_items:
+        items.sort(key=sentinel_item_datetime)
+        return items
+
+    point_geometries = samples.geometry
+    groups = {}
+    ignored_items = 0
+    for item in items:
+        coverage_count = sentinel_item_coverage_count(item, point_geometries)
+        if coverage_count <= 0:
+            ignored_items += 1
+            continue
+        group_key = sentinel_item_group_key(item)
+        groups.setdefault(group_key, []).append((coverage_count, item))
+
+    if not groups:
+        update_status(
+            status_box,
+            "No se pudo calcular cobertura espacial de escenas Sentinel-2; "
+            "se usaran escenas de menor nubosidad.",
+        )
+        return select_sentinel_items(
+            items,
+            max_items,
+            status_box=status_box,
+            purpose="entrenamiento WoSIS",
+        )
+
+    for group_items in groups.values():
+        group_items.sort(
+            key=lambda record: (
+                -record[0],
+                sentinel_item_cloud_cover(record[1]),
+                sentinel_item_datetime(record[1]),
+            )
+        )
+
+    selected = []
+    ordered_group_keys = sorted(
+        groups,
+        key=lambda group_key: (
+            -max(record[0] for record in groups[group_key]),
+            group_key,
+        ),
+    )
+    while len(selected) < max_items and ordered_group_keys:
+        next_keys = []
+        for group_key in ordered_group_keys:
+            if not groups[group_key]:
+                continue
+            selected.append(groups[group_key].pop(0)[1])
+            if len(selected) >= max_items:
+                break
+            if groups[group_key]:
+                next_keys.append(group_key)
+        ordered_group_keys = next_keys
+
+    selected.sort(key=sentinel_item_datetime)
+    update_status(
+        status_box,
+        "Sentinel-2 devolvio "
+        f"{len(items):,} escenas para entrenamiento; se usaran "
+        f"{len(selected):,} escenas que cubren perfiles WoSIS en "
+        f"{len(groups):,} tiles. Escenas sin perfiles cubiertos: {ignored_items:,}.",
     )
     return selected
 
@@ -588,7 +678,7 @@ def bare_soil_mask_and_score(features, scl):
         valid_features &= np.isfinite(features[feature_name])
 
     not_vegetated_scl = scl == 5
-    bare_mask = (
+    strict_bare = (
         valid_features
         & not_vegetated_scl
         & (features["NDVI"] >= -0.05)
@@ -596,6 +686,16 @@ def bare_soil_mask_and_score(features, scl):
         & (features["NDWI"] < 0.10)
         & (features["B04"] > 0.02)
     )
+    spectral_bare = (
+        valid_features
+        & np.isin(scl, SENTINEL_CLEAR_SCL_CLASSES)
+        & (features["NDVI"] >= -0.08)
+        & (features["NDVI"] <= 0.40)
+        & (features["NDWI"] < 0.12)
+        & (features["B04"] > 0.02)
+        & (features["BSI"] > -0.25)
+    )
+    bare_mask = strict_bare | spectral_bare
     score = (
         features["BSI"]
         - np.abs(features["NDVI"]) * 0.5
@@ -775,10 +875,11 @@ def read_asset_samples(href, points_wgs84):
         xs, ys = transform_coordinates("EPSG:4326", src.crs, lons.tolist(), lats.tolist())
         sampled = []
         for value in src.sample(zip(xs, ys), masked=True):
-            if np.ma.is_masked(value) or len(value) == 0:
+            if len(value) == 0 or np.any(np.ma.getmaskarray(value)):
                 sampled.append(np.nan)
             else:
-                sampled.append(float(value[0]))
+                sample_value = float(value[0])
+                sampled.append(sample_value if np.isfinite(sample_value) else np.nan)
     return np.asarray(sampled, dtype="float32")
 
 
@@ -788,8 +889,8 @@ def extract_training_features_from_sentinel(samples, status_box=None):
         bounds,
         status_box,
         purpose="entrenamiento WoSIS",
-        max_items=SENTINEL_MAX_TRAINING_ITEMS,
     )
+    items = select_training_sentinel_items(items, samples, SENTINEL_MAX_TRAINING_ITEMS, status_box)
     best_score = np.full(len(samples), -np.inf, dtype="float32")
     feature_values = {
         feature_name: np.full(len(samples), np.nan, dtype="float32")
@@ -860,11 +961,16 @@ def extract_training_features_from_sentinel(samples, status_box=None):
     feature_frame = pd.DataFrame(feature_values)
     valid = np.isfinite(best_score)
     valid &= feature_frame.replace([np.inf, -np.inf], np.nan).notna().all(axis=1).to_numpy()
-    if np.count_nonzero(valid) < SENTINEL_MIN_WOSIS_SAMPLES:
+    valid_count = int(np.count_nonzero(valid))
+    if valid_count < SENTINEL_MIN_WOSIS_SAMPLES:
         raise RuntimeError(
             "No hay suficientes perfiles WoSIS con observaciones Sentinel-2 de suelo descubierto "
-            f"({np.count_nonzero(valid)}; minimo {SENTINEL_MIN_WOSIS_SAMPLES}). "
-            "El modelo experimental se detiene."
+            f"({valid_count}; minimo {SENTINEL_MIN_WOSIS_SAMPLES}). "
+            f"Se procesaron {processed_items} escenas Sentinel-2 para "
+            f"{len(samples)} perfiles WoSIS completos y fallaron {len(failed_items)} escenas. "
+            "El modelo experimental se detiene. Prueba con un poligono en una zona con "
+            "mas suelo descubierto, amplia el buffer/periodo de entrenamiento en el codigo "
+            "o usa OpenLandMap/SoilGrids para esta corrida."
         )
 
     valid_samples = samples.loc[valid].reset_index(drop=True)

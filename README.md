@@ -70,8 +70,8 @@ Modo experimental para comparar contra las fuentes globales base. Entrena un mod
 - Area Sentinel-2 de entrenamiento: usa el extent total de los perfiles WoSIS encontrados para extraer covariables Sentinel-2 en esos puntos conocidos.
 - Area de prediccion: estima arena, limo y arcilla solo dentro del poligono original, a 20 m, y unicamente en pixeles Sentinel-2 clasificados como suelo descubierto.
 - Imagenes: escenas Sentinel-2 L2A disponibles en Microsoft Planetary Computer.
-- Seleccion Sentinel-2: prioriza escenas de menor nubosidad y limita la corrida por defecto a 80 escenas para entrenamiento y 60 para prediccion.
-- Compuesto: selecciona por pixel la observacion mas representativa de suelo descubierto y omite escenas remotas que fallen de forma puntual.
+- Seleccion Sentinel-2: para entrenamiento prioriza escenas que cubren perfiles WoSIS y, dentro de ellas, menor nubosidad; limita la corrida por defecto a 80 escenas para entrenamiento y 60 para prediccion.
+- Compuesto: selecciona por pixel la observacion mas representativa de suelo descubierto; usa SCL clase 5 como criterio fuerte y un respaldo espectral de baja vegetacion/no agua para evitar descartar escenas utiles.
 - Resolucion de salida: 20 m.
 - Covariables: bandas visibles, NIR, SWIR e indices NDVI, SAVI, MSAVI, BSI, CI, NDWI, GEOI y BI.
 - Validacion: calcula metricas internas con validacion espacial por grupos cuando hay suficientes perfiles distribuidos.
