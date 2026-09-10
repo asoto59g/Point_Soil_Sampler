@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="520" viewBox="0 0 960 520" role="img" aria-labelledby="title desc">
+  <title id="title">Mapa conceptual de zonas texturales y puntos de muestreo</title>
+  <desc id="desc">Ejemplo generico sin coordenadas reales que muestra un poligono agricola, zonas texturales y puntos de muestreo.</desc>
+  <rect width="960" height="520" fill="#f4f7f2"/>
+  <g opacity="0.55" stroke="#d9e1d3" stroke-width="1">
+    <path d="M0 80H960M0 160H960M0 240H960M0 320H960M0 400H960M0 480H960"/>
+    <path d="M80 0V520M160 0V520M240 0V520M320 0V520M400 0V520M480 0V520M560 0V520M640 0V520M720 0V520M800 0V520M880 0V520"/>
+  </g>
+  <path d="M168 318 L214 180 L356 108 L520 126 L690 192 L782 314 L724 414 L548 460 L352 430 Z" fill="#dfe8d2" stroke="#29452f" stroke-width="5" stroke-linejoin="round"/>
+  <clipPath id="field">
+    <path d="M168 318 L214 180 L356 108 L520 126 L690 192 L782 314 L724 414 L548 460 L352 430 Z"/>
+  </clipPath>
+  <g clip-path="url(#field)">
+    <path d="M130 356 C210 294 292 266 384 294 C476 322 548 294 628 236 C704 180 796 194 846 250 L846 520 L130 520 Z" fill="#b77b4f"/>
+    <path d="M120 92 C242 142 310 184 362 248 C420 320 520 330 620 290 C718 252 792 270 848 336 L848 88 Z" fill="#d8c985"/>
+    <path d="M286 78 C336 170 376 230 456 250 C548 274 632 246 724 186 L842 116 L842 78 Z" fill="#8aa66a"/>
+    <path d="M142 220 C244 218 312 242 374 318 C432 390 528 418 630 388 C722 360 802 386 842 446 L842 520 L142 520 Z" fill="#cf985a" opacity="0.86"/>
+    <path d="M130 88 L850 450" stroke="#ffffff" stroke-width="9" opacity="0.3"/>
+    <path d="M166 410 L796 152" stroke="#ffffff" stroke-width="7" opacity="0.28"/>
+  </g>
+  <path d="M168 318 L214 180 L356 108 L520 126 L690 192 L782 314 L724 414 L548 460 L352 430 Z" fill="none" stroke="#29452f" stroke-width="5" stroke-linejoin="round"/>
+  <g fill="#123524" stroke="#ffffff" stroke-width="4">
+    <circle cx="264" cy="244" r="12"/>
+    <circle cx="438" cy="198" r="12"/>
+    <circle cx="610" cy="254" r="12"/>
+    <circle cx="360" cy="356" r="12"/>
+    <circle cx="552" cy="382" r="12"/>
+    <circle cx="690" cy="344" r="12"/>
+  </g>
+  <g font-family="Arial, sans-serif" fill="#1f2b1f">
+    <text x="46" y="58" font-size="30" font-weight="700">Ejemplo conceptual</text>
+    <text x="46" y="92" font-size="17">Zonas texturales continuas y puntos preliminares de muestreo</text>
+    <g transform="translate(46 394)" font-size="16">
+      <rect width="238" height="84" rx="8" fill="#ffffff" opacity="0.92"/>
+      <rect x="18" y="18" width="22" height="14" fill="#d8c985"/>
+      <text x="50" y="31">Franco-arenosa</text>
+      <rect x="18" y="42" width="22" height="14" fill="#b77b4f"/>
+      <text x="50" y="55">Franco-arcillosa</text>
+      <circle cx="29" cy="71" r="7" fill="#123524"/>
+      <text x="50" y="76">Punto propuesto</text>
+    </g>
+  </g>
+</svg>

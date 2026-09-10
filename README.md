@@ -3,13 +3,38 @@
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://pointsoilsampler-nzqz5m3sbjzuxxmwyappkrb.streamlit.app/)
 ![GitHub last commit](https://img.shields.io/github/last-commit/asoto59g/Point_Soil_Sampler)
 ![GitHub repo size](https://img.shields.io/github/repo-size/asoto59g/Point_Soil_Sampler)
+![GitHub License](https://img.shields.io/github/license/asoto59g/Point_Soil_Sampler)
 ![Python](https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-app-FF4B4B?logo=streamlit&logoColor=white)
 ![Data sources](https://img.shields.io/badge/Data-OpenLandMap%20%7C%20SoilGrids%20%7C%20WoSIS%20%7C%20Sentinel--2-2E7D32)
 
 https://pointsoilsampler-nzqz5m3sbjzuxxmwyappkrb.streamlit.app/
 
-Aplicacion Streamlit para definir puntos preliminares de muestreo de suelos dentro de un poligono, usando textura USDA calculada desde fuentes reales de arena, limo y arcilla. La app no genera datos simulados: si una fuente remota no responde, el procesamiento se detiene.
+## Problema Que Resuelve
+
+Point Soil Sampler ayuda a definir puntos preliminares de muestreo de suelos dentro de un poligono agricola. La app estima textura USDA desde fuentes reales de arena, limo y arcilla, vectoriza zonas texturales continuas y genera puntos, tablas y archivos GIS descargables.
+
+La app no genera datos simulados: si una fuente remota no responde o no existen datos suficientes, el procesamiento se detiene.
+
+## Innovacion O Aporte Tecnico
+
+- Integra una interfaz Streamlit con fuentes globales de textura y salidas GIS listas para revision.
+- Clasifica textura USDA a partir de fracciones normalizadas de arena, limo y arcilla.
+- Compara fuentes globales base: OpenLandMap-soildb 120 m y SoilGrids250m / ISRIC WCS.
+- Incluye un modo experimental Sentinel-2 + WoSIS que entrena un `RandomForestRegressor` local con perfiles reales WoSIS y covariables multitemporales Sentinel-2 L2A.
+- Exporta capas auxiliares de consistencia, observaciones Sentinel-2 de suelo descubierto, score de suelo descubierto e incertidumbre del modelo experimental.
+
+## Metodologia Y Algoritmo
+
+1. El usuario dibuja un poligono sobre el mapa satelital o sube un archivo GeoJSON.
+2. Antes de procesar, el poligono activo se puede guardar o descargar como GeoJSON con nombre propio.
+3. La app extrae arena, limo y arcilla desde la fuente seleccionada.
+4. Las fracciones se normalizan a 100% y se clasifican en textura USDA.
+5. Se crea un raster de clase textural, usando `0` solo como nodata.
+6. El raster se vectoriza en poligonos continuos de clase textural.
+7. Cada poligono continuo de clase textural se mantiene con el tamano resultante de la clasificacion.
+8. Para cada poligono continuo de clase textural se genera un solo punto en su centroide.
+9. Se crean archivos descargables y una carpeta local de salida por corrida.
 
 ## Fuentes De Datos
 
@@ -50,25 +75,48 @@ Modo experimental para comparar contra las fuentes globales base. Entrena un mod
 - Covariables: bandas visibles, NIR, SWIR e indices NDVI, SAVI, MSAVI, BSI, CI, NDWI, GEOI y BI.
 - Validacion: calcula metricas internas con validacion espacial por grupos cuando hay suficientes perfiles distribuidos.
 
-Advertencias:
+## Datos De Entrada Y Formatos Soportados
 
-- Es una prediccion experimental, no una fuente oficial ni un reemplazo de muestreo de campo.
-- Sentinel-2 observa principalmente la superficie; no garantiza representar todo el intervalo 0-30 cm.
-- Humedad, rastrojo, sombra, residuos de cultivo, nubosidad y cobertura vegetal pueden sesgar la estimacion.
-- Si no hay suficientes perfiles WoSIS completos o pixeles Sentinel-2 de suelo descubierto, el proceso se detiene.
-- Para uso operativo, comparar contra OpenLandMap/SoilGrids y revisar la incertidumbre exportada.
+- Poligono dibujado en el mapa de la app.
+- Archivo `.geojson` o `.json` con geometria `Polygon` o `MultiPolygon`.
+- Coordenadas de entrada esperadas en WGS84 / EPSG:4326.
 
-## Metodologia
+No se requieren API keys, tokens, credenciales de Google Earth Engine ni archivos de autenticacion para la configuracion actual.
 
-1. El usuario dibuja un poligono sobre el mapa satelital o sube un archivo GeoJSON.
-2. Antes de procesar, el poligono activo se puede guardar o descargar como GeoJSON con nombre propio.
-3. La app extrae arena, limo y arcilla desde la fuente seleccionada.
-4. Las fracciones se normalizan a 100% y se clasifican en textura USDA.
-5. Se crea un raster de clase textural, usando `0` solo como nodata.
-6. El raster se vectoriza en poligonos continuos de clase textural.
-7. Cada poligono continuo de clase textural se mantiene con el tamano resultante de la clasificacion.
-8. Para cada poligono continuo de clase textural se genera un solo punto en su centroide.
-9. Se crean archivos descargables y una carpeta local de salida por corrida.
+## Instalacion Y Ejecucion
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+La app requiere conexion a internet para leer `s3.opengeohub.org`, `maps.isric.org` y, en el modo experimental, `planetarycomputer.microsoft.com`.
+
+## Ejemplo Visual
+
+![Mapa conceptual de zonas texturales y puntos de muestreo](docs/example-map.svg)
+
+El mapa de la app permite cargar o dibujar el poligono, ejecutar la clasificacion y visualizar zonas texturales junto con los puntos propuestos.
+
+## Archivos De Salida
+
+Cada corrida crea una carpeta en `salidas/muestreo_YYYYMMDD_HHMMSS/` con:
+
+- `raster_textura_120m.tif` para OpenLandMap-soildb
+- `raster_textura_250m.tif` para SoilGrids250m
+- `raster_textura_20m_sentinel_wosis.tif` para el modo experimental Sentinel-2 + WoSIS
+- `consistencia_intervalo_68_120m.tif` cuando se usa OpenLandMap-soildb
+- `sentinel_suelo_descubierto_observaciones.tif` cuando se usa Sentinel-2 + WoSIS
+- `sentinel_suelo_descubierto_score.tif` cuando se usa Sentinel-2 + WoSIS
+- `incertidumbre_modelo_sentinel_wosis.tif` cuando se usa Sentinel-2 + WoSIS
+- `zonas_texturales.geojson`
+- `poligonos_muestreo.geojson`
+- `puntos_muestreo.geojson`
+- `puntos_muestreo.csv`
+- `tabla_clases_textura.csv`
+- `metadata_fuente.json`
+
+La carpeta `salidas/` esta ignorada por Git para evitar subir archivos generados al repositorio. Los poligonos guardados antes de procesar se escriben en `salidas/poligonos/NOMBRE.geojson`.
 
 ## Clases Texturales USDA
 
@@ -89,44 +137,41 @@ La tabla exportada contiene exactamente 12 clases texturales:
 | 11 | Limo-arcillosa (Silty clay) |
 | 12 | Arcillosa (Clay) |
 
-## Archivos De Salida
-
-Cada corrida crea una carpeta en `salidas/muestreo_YYYYMMDD_HHMMSS/` con:
-
-- `raster_textura_120m.tif` para OpenLandMap-soildb
-- `raster_textura_250m.tif` para SoilGrids250m
-- `raster_textura_20m_sentinel_wosis.tif` para el modo experimental Sentinel-2 + WoSIS
-- `consistencia_intervalo_68_120m.tif` cuando se usa OpenLandMap-soildb
-- `sentinel_suelo_descubierto_observaciones.tif` cuando se usa Sentinel-2 + WoSIS
-- `sentinel_suelo_descubierto_score.tif` cuando se usa Sentinel-2 + WoSIS
-- `incertidumbre_modelo_sentinel_wosis.tif` cuando se usa Sentinel-2 + WoSIS
-- `zonas_texturales.geojson`
-- `poligonos_muestreo.geojson`
-- `puntos_muestreo.geojson`
-- `puntos_muestreo.csv`
-- `tabla_clases_textura.csv`
-- `metadata_fuente.json`
-
-La carpeta `salidas/` esta ignorada por Git para evitar subir archivos generados al repositorio.
-
-Los poligonos guardados antes de procesar se escriben en `salidas/poligonos/NOMBRE.geojson`.
-
 ## Regla De Muestreo
 
 La app genera un punto por cada poligono continuo de clase textural. No subdivide poligonos mayores de 85 ha y no suma poligonos separados de la misma clase.
 
 Cada punto se ubica en el centroide del poligono textural correspondiente. El CSV de puntos incluye `zona_id`, `texture_id`, `Textura`, `area_zona_ha`, `metodo_punto`, `Lat` y `Lon`.
 
-## Instalacion
+## Limitaciones Tecnicas
 
-```bash
-pip install -r requirements.txt
+- Las fuentes globales no sustituyen muestreo de campo, cartografia local ni validacion agronomica.
+- Sentinel-2 observa principalmente la superficie; no garantiza representar todo el intervalo 0-30 cm.
+- Humedad, rastrojo, sombra, residuos de cultivo, nubosidad y cobertura vegetal pueden sesgar la estimacion.
+- El modo Sentinel-2 + WoSIS depende de que existan suficientes perfiles WoSIS completos y pixeles Sentinel-2 de suelo descubierto.
+- Las capas remotas pueden cambiar, quedar temporalmente fuera de servicio o limitar respuestas.
+- Para uso operativo, conviene comparar OpenLandMap/SoilGrids/Sentinel-WoSIS y revisar incertidumbre o consistencia exportada.
+
+## Roadmap
+
+- Agregar pruebas automatizadas para clasificacion USDA, validacion de GeoJSON y escritura de salidas.
+- Incorporar un ejemplo reproducible con datos sinteticos o anonimizados.
+- Permitir configurar parametros del modo experimental desde la interfaz.
+- Mejorar reportes de calidad del modelo y resumen de incertidumbre.
+- Agregar soporte opcional para otros criterios de distribucion de puntos.
+
+## Seguridad Y Publicacion
+
+- No se versionan credenciales, secretos, archivos `.env`, credenciales de Google Earth Engine ni archivos de autenticacion.
+- No se versionan resultados generados, GeoTIFF, shapefiles, geopackages, ortofotos, DEM, PDFs de referencia ni GeoJSON con datos reales de clientes.
+- Antes de publicar cambios con datos reales, revisar tambien el historial de Git. Borrar un archivo en un commit no lo elimina de commits anteriores.
+
+## Licencia Y Citacion Sugerida
+
+Este proyecto se distribuye bajo licencia MIT. Ver [LICENSE](LICENSE).
+
+Citacion sugerida:
+
+```text
+Soto Barquero, A. (2026). Point Soil Sampler: Streamlit app for preliminary soil texture sampling design. GitHub repository: https://github.com/asoto59g/Point_Soil_Sampler
 ```
-
-## Ejecucion
-
-```bash
-streamlit run app.py
-```
-
-La app requiere conexion a internet para leer `s3.opengeohub.org`, `maps.isric.org` y, en el modo experimental, `planetarycomputer.microsoft.com`.
