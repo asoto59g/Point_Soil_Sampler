@@ -1,5 +1,12 @@
 # Point Soil Sampler
 
+[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://pointsoilsampler-nzqz5m3sbjzuxxmwyappkrb.streamlit.app/)
+![GitHub last commit](https://img.shields.io/github/last-commit/asoto59g/Point_Soil_Sampler)
+![GitHub repo size](https://img.shields.io/github/repo-size/asoto59g/Point_Soil_Sampler)
+![Python](https://img.shields.io/badge/Python-3.x-3776AB?logo=python&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-app-FF4B4B?logo=streamlit&logoColor=white)
+![Data sources](https://img.shields.io/badge/Data-OpenLandMap%20%7C%20SoilGrids%20%7C%20WoSIS%20%7C%20Sentinel--2-2E7D32)
+
 https://pointsoilsampler-nzqz5m3sbjzuxxmwyappkrb.streamlit.app/
 
 Aplicacion Streamlit para definir puntos preliminares de muestreo de suelos dentro de un poligono, usando textura USDA calculada desde fuentes reales de arena, limo y arcilla. La app no genera datos simulados: si una fuente remota no responde, el procesamiento se detiene.
@@ -34,6 +41,9 @@ Modo experimental para comparar contra las fuentes globales base. Entrena un mod
 
 - Entrenamiento: perfiles WoSIS con `sand`, `silt` y `clay`, filtrados a profundidad 0-30 cm y licencias publicas compatibles.
 - Descarga WoSIS: consulta el WFS por teselas con reintentos para reducir respuestas grandes o mal formadas.
+- Area WoSIS: busca puntos conocidos dentro de un buffer de 250 km alrededor del poligono ingresado.
+- Area Sentinel-2 de entrenamiento: usa el extent total de los perfiles WoSIS encontrados para extraer covariables Sentinel-2 en esos puntos conocidos.
+- Area de prediccion: estima arena, limo y arcilla solo dentro del poligono original, a 20 m, y unicamente en pixeles Sentinel-2 clasificados como suelo descubierto.
 - Imagenes: escenas Sentinel-2 L2A disponibles en Microsoft Planetary Computer.
 - Compuesto: usa todas las escenas Sentinel-2 encontradas para el area y selecciona por pixel la observacion mas representativa de suelo descubierto.
 - Resolucion de salida: 20 m.
