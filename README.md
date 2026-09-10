@@ -1,3 +1,5 @@
+<img width="1667" height="469" alt="preview2" src="https://github.com/user-attachments/assets/91833743-81aa-43ab-bb8e-6ee9654ff37d" />
+
 # Point Soil Sampler
 
 [![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://pointsoilsampler-nzqz5m3sbjzuxxmwyappkrb.streamlit.app/)
