@@ -71,6 +71,7 @@ Modo experimental para comparar contra las fuentes globales base. Entrena un mod
 - Area de prediccion: estima arena, limo y arcilla solo dentro del poligono original, a 20 m, y unicamente en pixeles Sentinel-2 clasificados como suelo descubierto.
 - Imagenes: escenas Sentinel-2 L2A disponibles en Microsoft Planetary Computer.
 - Seleccion Sentinel-2: para entrenamiento prioriza escenas que cubren perfiles WoSIS y, dentro de ellas, menor nubosidad; limita la corrida por defecto a 80 escenas para entrenamiento y 60 para prediccion.
+- Tiempo de ejecucion: la creacion del modelo Sentinel-2 puede tardar mas de 20 minutos porque descarga, lee y procesa muchas escenas y bandas para entrenamiento y prediccion.
 - Acceso Sentinel-2: firma cada asset de Planetary Computer justo antes de leerlo y exige una vigencia minima para evitar tokens vencidos en corridas largas.
 - Compuesto: selecciona por pixel la observacion mas representativa de suelo descubierto; usa SCL clase 5 como criterio fuerte y un respaldo espectral de baja vegetacion/no agua para evitar descartar escenas utiles.
 - Resolucion de salida: 20 m.
