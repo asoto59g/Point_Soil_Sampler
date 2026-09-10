@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 import os
 import time
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 try:
     from pyproj import datadir as pyproj_datadir
@@ -39,6 +40,7 @@ SENTINEL_MIN_PREDICTION_ITEMS = 20
 SENTINEL_TARGET_BARE_PIXEL_PERCENT = 90.0
 SENTINEL_MAX_ITEM_FAILURES = 12
 SENTINEL_CLEAR_SCL_CLASSES = (4, 5, 7)
+SENTINEL_SIGNED_URL_MIN_TTL_SECONDS = 10 * 60
 SENTINEL_RF_TREES = 300
 SENTINEL_RF_RANDOM_STATE = 42
 SENTINEL_GDAL_OPTIONS = {
@@ -561,17 +563,23 @@ def raise_if_too_many_sentinel_failures(failed_items, phase, exc):
     if len(failed_items) < SENTINEL_MAX_ITEM_FAILURES:
         return
     item_id, detail = failed_items[-1]
+    hint = ""
+    detail_text = str(detail)
+    if "blob.core.windows.net" in detail_text and "not recognized as being in a supported file format" in detail_text:
+        hint = (
+            " Esto puede ocurrir cuando vence una firma temporal de Planetary "
+            "Computer y el servidor devuelve una respuesta de error en vez del GeoTIFF."
+        )
     raise RuntimeError(
         f"Demasiadas escenas Sentinel-2 fallaron durante {phase} "
         f"({len(failed_items)} fallos). Ultima escena: {item_id}. "
-        f"Detalle tecnico: {detail}"
+        f"Detalle tecnico: {detail}{hint}"
     ) from exc
 
 
 def search_sentinel_items(bounds, status_box=None, purpose="modelo", max_items=None):
     modules = require_experimental_dependencies()
     pystac_client = modules["pystac_client"]
-    planetary_computer = modules["planetary_computer"]
 
     datetime_range = sentinel_datetime_range()
     max_items_message = (
@@ -585,10 +593,7 @@ def search_sentinel_items(bounds, status_box=None, purpose="modelo", max_items=N
         f"{purpose} ({datetime_range}, nubosidad escena < "
         f"{SENTINEL_CLOUD_COVER_LT}%{max_items_message})...",
     )
-    catalog = pystac_client.Client.open(
-        SENTINEL_STAC_URL,
-        modifier=planetary_computer.sign_inplace,
-    )
+    catalog = pystac_client.Client.open(SENTINEL_STAC_URL)
     search = catalog.search(
         collections=[SENTINEL_COLLECTION],
         bbox=list(bounds),
@@ -605,10 +610,84 @@ def search_sentinel_items(bounds, status_box=None, purpose="modelo", max_items=N
     return select_sentinel_items(items, max_items, status_box, purpose)
 
 
+def unsigned_asset_href(href):
+    parsed = urlsplit(href)
+    query = parse_qs(parsed.query)
+    if {"st", "se", "sp"} & set(query):
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", parsed.fragment))
+    return href
+
+
+def signed_url_expires_at(href):
+    expires_values = parse_qs(urlsplit(href).query).get("se")
+    if not expires_values:
+        return None
+    try:
+        return datetime.fromisoformat(expires_values[0].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def signed_url_has_enough_ttl(href):
+    expires_at = signed_url_expires_at(href)
+    if not expires_at:
+        return True
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    ttl_seconds = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    return ttl_seconds > SENTINEL_SIGNED_URL_MIN_TTL_SECONDS
+
+
+def clear_planetary_computer_token_cache(planetary_computer):
+    sas_module = getattr(planetary_computer, "sas", None)
+    if sas_module is None:
+        try:
+            sas_module = __import__("planetary_computer.sas", fromlist=["TOKEN_CACHE"])
+        except ImportError:
+            return
+    token_cache = getattr(sas_module, "TOKEN_CACHE", None)
+    if hasattr(token_cache, "clear"):
+        token_cache.clear()
+
+
+def sign_planetary_computer_href(planetary_computer, href):
+    sign_url = getattr(planetary_computer, "sign_url", None)
+    if callable(sign_url):
+        signed = sign_url(href)
+        return getattr(signed, "href", signed)
+    sign = getattr(planetary_computer, "sign", None)
+    if callable(sign):
+        signed = sign(href)
+        return getattr(signed, "href", signed)
+    raise RuntimeError(
+        "La dependencia planetary-computer instalada no expone una funcion "
+        "compatible para firmar assets Sentinel-2."
+    )
+
+
+def sign_asset_href(href):
+    planetary_computer = require_experimental_dependencies()["planetary_computer"]
+    unsigned_href = unsigned_asset_href(href)
+    signed_href = sign_planetary_computer_href(planetary_computer, unsigned_href)
+    if signed_url_has_enough_ttl(signed_href):
+        return signed_href
+
+    clear_planetary_computer_token_cache(planetary_computer)
+    signed_href = sign_planetary_computer_href(planetary_computer, unsigned_href)
+    if signed_url_has_enough_ttl(signed_href):
+        return signed_href
+
+    expires_at = signed_url_expires_at(signed_href)
+    raise RuntimeError(
+        "Planetary Computer devolvio una firma Sentinel-2 con vigencia "
+        f"insuficiente (vence: {expires_at}). Reintenta en unos minutos."
+    )
+
+
 def item_asset_href(item, logical_name):
     for asset_name in SENTINEL_ASSET_ALIASES[logical_name]:
         if asset_name in item.assets:
-            return item.assets[asset_name].href
+            return sign_asset_href(item.assets[asset_name].href)
     raise RuntimeError(f"La escena Sentinel-2 {item.id} no contiene el asset {logical_name}.")
 
 
