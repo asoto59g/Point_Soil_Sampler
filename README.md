@@ -33,6 +33,7 @@ Fuente alternativa global para comparar resultados. Usa el servicio WCS de ISRIC
 Modo experimental para comparar contra las fuentes globales base. Entrena un modelo local `RandomForestRegressor` con observaciones reales WoSIS/ISRIC de arena, limo y arcilla 0-30 cm y covariables Sentinel-2 L2A.
 
 - Entrenamiento: perfiles WoSIS con `sand`, `silt` y `clay`, filtrados a profundidad 0-30 cm y licencias publicas compatibles.
+- Descarga WoSIS: consulta el WFS por teselas con reintentos para reducir respuestas grandes o mal formadas.
 - Imagenes: escenas Sentinel-2 L2A disponibles en Microsoft Planetary Computer.
 - Compuesto: usa todas las escenas Sentinel-2 encontradas para el area y selecciona por pixel la observacion mas representativa de suelo descubierto.
 - Resolucion de salida: 20 m.

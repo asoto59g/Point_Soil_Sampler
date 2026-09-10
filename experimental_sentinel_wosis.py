@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
+import json
 import os
+import time
 
 try:
     from pyproj import datadir as pyproj_datadir
@@ -39,6 +41,10 @@ SENTINEL_GDAL_OPTIONS = {
     "VSI_CACHE_SIZE": "50000000",
 }
 WOSIS_WFS_URL = "https://maps.isric.org/mapserv"
+WOSIS_REQUEST_TIMEOUT_SECONDS = 120
+WOSIS_REQUEST_RETRIES = 3
+WOSIS_TILE_SIZE_DEGREES = 2.0
+WOSIS_MIN_TILE_SIZE_DEGREES = 0.25
 WOSIS_PROPERTIES = {
     "sand": "wosis_latest_sand",
     "silt": "wosis_latest_silt",
@@ -167,7 +173,79 @@ def build_prediction_grid(poly_geom, max_pixels):
     }
 
 
-def fetch_wosis_property(requests_module, property_key, bounds):
+def empty_wosis_property_gdf(property_key):
+    return gpd.GeoDataFrame(
+        columns=["profile_id", property_key, "geometry"],
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+
+
+def split_bounds(bounds, tile_size_degrees=WOSIS_TILE_SIZE_DEGREES):
+    minx, miny, maxx, maxy = bounds
+    x_steps = max(1, int(np.ceil((maxx - minx) / tile_size_degrees)))
+    y_steps = max(1, int(np.ceil((maxy - miny) / tile_size_degrees)))
+    x_edges = np.linspace(minx, maxx, x_steps + 1)
+    y_edges = np.linspace(miny, maxy, y_steps + 1)
+
+    for x_index in range(x_steps):
+        for y_index in range(y_steps):
+            yield (
+                float(x_edges[x_index]),
+                float(y_edges[y_index]),
+                float(x_edges[x_index + 1]),
+                float(y_edges[y_index + 1]),
+            )
+
+
+def split_bounds_quadrants(bounds):
+    minx, miny, maxx, maxy = bounds
+    midx = (minx + maxx) / 2.0
+    midy = (miny + maxy) / 2.0
+    return [
+        (minx, miny, midx, midy),
+        (midx, miny, maxx, midy),
+        (minx, midy, midx, maxy),
+        (midx, midy, maxx, maxy),
+    ]
+
+
+def response_excerpt(response, max_chars=500):
+    text = response.text.replace("\r", " ").replace("\n", " ").strip()
+    return text[:max_chars]
+
+
+def parse_wosis_geojson_response(response, property_key, tile_bounds):
+    content_type = response.headers.get("content-type", "sin content-type")
+    excerpt = response_excerpt(response)
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"WoSIS/ISRIC no respondio correctamente para {property_key}: "
+            f"HTTP {response.status_code}, {content_type}, tesela {tile_bounds}. "
+            f"Respuesta: {excerpt}"
+        )
+    if response.text.lstrip().startswith("<"):
+        raise RuntimeError(
+            f"WoSIS/ISRIC devolvio XML/HTML en vez de GeoJSON para {property_key}, "
+            f"tesela {tile_bounds}. Respuesta: {excerpt}"
+        )
+    try:
+        payload = json.loads(response.text)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"WoSIS/ISRIC no devolvio GeoJSON valido para {property_key}, "
+            f"tesela {tile_bounds}, {content_type}. Respuesta: {excerpt}"
+        ) from exc
+
+    if payload.get("type") != "FeatureCollection" or "features" not in payload:
+        raise RuntimeError(
+            f"WoSIS/ISRIC devolvio una estructura inesperada para {property_key}, "
+            f"tesela {tile_bounds}. Respuesta: {str(payload)[:500]}"
+        )
+    return payload
+
+
+def request_wosis_tile(requests_client, property_key, tile_bounds):
     layer_name = WOSIS_PROPERTIES[property_key]
     params = {
         "map": "/map/wosis_latest.map",
@@ -177,23 +255,82 @@ def fetch_wosis_property(requests_module, property_key, bounds):
         "TYPENAME": layer_name,
         "OUTPUTFORMAT": "geojson",
         "SRSNAME": "EPSG:4326",
-        "BBOX": ",".join(f"{value:.8f}" for value in bounds),
+        "BBOX": ",".join(f"{value:.8f}" for value in tile_bounds),
     }
-    response = requests_module.get(WOSIS_WFS_URL, params=params, timeout=120)
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"WoSIS/ISRIC no respondio correctamente para {property_key}: "
-            f"HTTP {response.status_code}."
-        )
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise RuntimeError(f"WoSIS/ISRIC no devolvio GeoJSON valido para {property_key}.") from exc
+    last_error = None
+    for attempt in range(1, WOSIS_REQUEST_RETRIES + 1):
+        try:
+            response = requests_client.get(
+                WOSIS_WFS_URL,
+                params=params,
+                timeout=WOSIS_REQUEST_TIMEOUT_SECONDS,
+            )
+            return parse_wosis_geojson_response(response, property_key, tile_bounds)
+        except Exception as exc:
+            last_error = exc
+            if attempt < WOSIS_REQUEST_RETRIES:
+                time.sleep(1.5 * attempt)
 
-    features = payload.get("features", [])
-    if not features:
-        return gpd.GeoDataFrame(columns=["profile_id", property_key, "geometry"], geometry="geometry", crs="EPSG:4326")
-    return gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
+    raise RuntimeError(
+        f"No se pudo descargar WoSIS {property_key} despues de "
+        f"{WOSIS_REQUEST_RETRIES} intentos. Detalle: {last_error}"
+    ) from last_error
+
+
+def request_wosis_tile_recursive(requests_client, property_key, tile_bounds, status_box=None):
+    try:
+        return [request_wosis_tile(requests_client, property_key, tile_bounds)]
+    except RuntimeError:
+        minx, miny, maxx, maxy = tile_bounds
+        if max(maxx - minx, maxy - miny) <= WOSIS_MIN_TILE_SIZE_DEGREES:
+            raise
+        update_status(
+            status_box,
+            f"WoSIS {property_key} devolvio una respuesta no valida; "
+            "reintentando con teselas menores...",
+        )
+        payloads = []
+        for smaller_tile in split_bounds_quadrants(tile_bounds):
+            payloads.extend(
+                request_wosis_tile_recursive(
+                    requests_client,
+                    property_key,
+                    smaller_tile,
+                    status_box=status_box,
+                )
+            )
+        return payloads
+
+
+def fetch_wosis_property(requests_module, property_key, bounds, status_box=None):
+    requests_client = requests_module.Session() if hasattr(requests_module, "Session") else requests_module
+    tiles = list(split_bounds(bounds))
+    frames = []
+    for tile_index, tile_bounds in enumerate(tiles, start=1):
+        update_status(
+            status_box,
+            f"Descargando WoSIS {property_key} {tile_index:,}/{len(tiles):,}...",
+        )
+        payloads = request_wosis_tile_recursive(
+            requests_client,
+            property_key,
+            tile_bounds,
+            status_box=status_box,
+        )
+        for payload in payloads:
+            features = payload.get("features", [])
+            if features:
+                frames.append(gpd.GeoDataFrame.from_features(features, crs="EPSG:4326"))
+
+    if not frames:
+        return empty_wosis_property_gdf(property_key)
+
+    combined = pd.concat(frames, ignore_index=True)
+    if "layer_id" in combined.columns:
+        combined = combined.drop_duplicates(subset=["layer_id"])
+    elif "profile_id" in combined.columns:
+        combined = combined.drop_duplicates(subset=["profile_id", "upper_depth", "lower_depth"])
+    return gpd.GeoDataFrame(combined, geometry="geometry", crs="EPSG:4326")
 
 
 def weighted_depth_average_for_property(gdf, property_key):
@@ -255,7 +392,7 @@ def fetch_wosis_texture_samples(poly_geom, status_box=None):
 
     property_tables = {}
     for property_key in WOSIS_PROPERTIES:
-        raw = fetch_wosis_property(requests_module, property_key, bounds)
+        raw = fetch_wosis_property(requests_module, property_key, bounds, status_box=status_box)
         property_tables[property_key] = weighted_depth_average_for_property(raw, property_key)
 
     samples = property_tables["sand"][["profile_id", "sand", "geometry"]]
