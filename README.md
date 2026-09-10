@@ -36,8 +36,8 @@ Fuente alternativa global para comparar resultados. Usa el servicio WCS de ISRIC
 4. Las fracciones se normalizan a 100% y se clasifican en textura USDA.
 5. Se crea un raster de clase textural, usando `0` solo como nodata.
 6. El raster se vectoriza en poligonos continuos de clase textural.
-7. Cada poligono continuo de clase textural se evalua por area. Si mide hasta 85 ha, genera un punto. Si supera 85 ha, se divide en unidades de muestreo de maximo 85 ha y el remanente genera una unidad adicional.
-8. Para cada unidad de muestreo se genera un punto aleatorio dentro de la geometria.
+7. Cada poligono continuo de clase textural se mantiene con el tamano resultante de la clasificacion.
+8. Para cada poligono continuo de clase textural se genera un solo punto en su centroide.
 9. Se crean archivos descargables y una carpeta local de salida por corrida.
 
 ## Clases Texturales USDA
@@ -67,7 +67,7 @@ Cada corrida crea una carpeta en `salidas/muestreo_YYYYMMDD_HHMMSS/` con:
 - `raster_textura_250m.tif` para SoilGrids250m
 - `consistencia_intervalo_68_120m.tif` cuando se usa OpenLandMap-soildb
 - `zonas_texturales.geojson`
-- `subzonas_muestreo.geojson`
+- `poligonos_muestreo.geojson`
 - `puntos_muestreo.geojson`
 - `puntos_muestreo.csv`
 - `tabla_clases_textura.csv`
@@ -77,17 +77,11 @@ La carpeta `salidas/` esta ignorada por Git para evitar subir archivos generados
 
 Los poligonos guardados antes de procesar se escriben en `salidas/poligonos/NOMBRE.geojson`.
 
-## Regla De Densidad De Muestreo
+## Regla De Muestreo
 
-La app genera un punto por cada 85 ha de una misma zona textural. El calculo se realiza por cada poligono continuo de clase textural, no sobre el poligono completo de entrada ni sumando poligonos separados de la misma clase:
+La app genera un punto por cada poligono continuo de clase textural. No subdivide poligonos mayores de 85 ha y no suma poligonos separados de la misma clase.
 
-- 0 a 85 ha: 1 punto
-- 85.01 a 170 ha: 2 puntos
-- 170.01 a 255 ha: 3 puntos
-
-Cuando una zona supera 85 ha, se crean subzonas internas y se genera un punto aleatorio dentro de cada subzona. Las zonas que no superan 85 ha tambien usan un punto aleatorio dentro de su geometria. El CSV de puntos incluye `zona_id`, `subzona_id`, `area_zona_ha`, `area_subzona_ha`, `puntos_zona` y `metodo_punto`.
-
-Cada vez que se ejecuta nuevamente el procesamiento se generan nuevas ubicaciones aleatorias para mejorar la variabilidad de futuras muestras, manteniendo las mismas zonas texturales y la regla de densidad.
+Cada punto se ubica en el centroide del poligono textural correspondiente. El CSV de puntos incluye `zona_id`, `texture_id`, `Textura`, `area_zona_ha`, `metodo_punto`, `Lat` y `Lon`.
 
 ## Instalacion
 
