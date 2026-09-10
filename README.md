@@ -72,13 +72,14 @@ Modo experimental para comparar contra las fuentes globales base. Entrena un mod
 - Area Sentinel-2 de entrenamiento: usa el extent total de los perfiles WoSIS encontrados para extraer covariables Sentinel-2 en esos puntos conocidos.
 - Area de prediccion: estima arena, limo y arcilla solo dentro del poligono original, a 20 m, y unicamente en pixeles Sentinel-2 clasificados como suelo descubierto.
 - Imagenes: escenas Sentinel-2 L2A disponibles en Microsoft Planetary Computer.
-- Seleccion Sentinel-2: para entrenamiento prioriza escenas que cubren perfiles WoSIS y, dentro de ellas, menor nubosidad; limita la corrida por defecto a 80 escenas para entrenamiento y 60 para prediccion.
-- Tiempo de ejecucion: la creacion del modelo Sentinel-2 puede tardar mas de 20 minutos porque descarga, lee y procesa muchas escenas y bandas para entrenamiento y prediccion.
+- Seleccion Sentinel-2: para entrenamiento prioriza escenas que cubren perfiles WoSIS y, dentro de ellas, menor nubosidad; limita la corrida por defecto a 120 escenas para entrenamiento y 90 para prediccion.
+- Tiempo de ejecucion: la creacion del modelo Sentinel-2 puede tardar bastante mas de 20 minutos porque descarga, lee y procesa muchas escenas y bandas para entrenamiento y prediccion.
 - Acceso Sentinel-2: firma cada asset de Planetary Computer justo antes de leerlo y exige una vigencia minima para evitar tokens vencidos en corridas largas.
-- Compuesto: selecciona por pixel la observacion mas representativa de suelo descubierto; usa SCL clase 5 como criterio fuerte y un respaldo espectral de baja vegetacion/no agua para evitar descartar escenas utiles.
+- Compuesto: usa SCL clase 5 como criterio fuerte de suelo no vegetado y un respaldo restringido con SCL clase 7; combina la mejor observacion y la media multitemporal de observaciones de suelo descubierto.
 - Resolucion de salida: 20 m.
-- Covariables: bandas visibles, NIR, SWIR e indices NDVI, SAVI, MSAVI, BSI, CI, NDWI, GEOI y BI.
+- Covariables: bandas visibles, NIR, SWIR e indices NDVI, SAVI, MSAVI, BSI, CI, NDWI, GEOI y BI, como mejor observacion y media multitemporal, mas ubicacion y conteo/score de suelo descubierto.
 - Validacion: calcula metricas internas con validacion espacial por grupos cuando hay suficientes perfiles distribuidos.
+- Postproceso: suaviza ligeramente las fracciones arena/limo/arcilla antes de clasificar USDA para reducir ruido salpicado de pixeles aislados.
 
 ## Datos De Entrada Y Formatos Soportados
 

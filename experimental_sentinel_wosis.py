@@ -29,17 +29,20 @@ SENTINEL_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 SENTINEL_COLLECTION = "sentinel-2-l2a"
 SENTINEL_DATETIME_START = "2016-01-01"
 SENTINEL_TARGET_RESOLUTION_M = 20
-SENTINEL_CLOUD_COVER_LT = 80
+SENTINEL_CLOUD_COVER_LT = 70
 SENTINEL_MIN_WOSIS_SAMPLES = 30
 SENTINEL_WOSIS_BUFFER_KM = 250
-SENTINEL_MAX_TRAINING_ITEMS = 80
-SENTINEL_MAX_PREDICTION_ITEMS = 60
-SENTINEL_MIN_TRAINING_ITEMS = 20
-SENTINEL_TRAINING_TARGET_VALID_SAMPLES = 60
-SENTINEL_MIN_PREDICTION_ITEMS = 20
+SENTINEL_MAX_TRAINING_ITEMS = 120
+SENTINEL_MAX_PREDICTION_ITEMS = 90
+SENTINEL_MIN_TRAINING_ITEMS = 25
+SENTINEL_TRAINING_TARGET_VALID_SAMPLES = 180
+SENTINEL_MIN_PREDICTION_ITEMS = 25
 SENTINEL_TARGET_BARE_PIXEL_PERCENT = 90.0
-SENTINEL_MAX_ITEM_FAILURES = 12
-SENTINEL_CLEAR_SCL_CLASSES = (4, 5, 7)
+SENTINEL_TARGET_MEAN_BARE_OBSERVATIONS = 3.0
+SENTINEL_TRAINING_TARGET_MEAN_BARE_OBSERVATIONS = 2.0
+SENTINEL_FRACTION_SMOOTHING_RADIUS_PIXELS = 2
+SENTINEL_MIN_SMOOTHING_NEIGHBORS = 5
+SENTINEL_MAX_ITEM_FAILURES = 20
 SENTINEL_SIGNED_URL_MIN_TTL_SECONDS = 10 * 60
 SENTINEL_RF_TREES = 300
 SENTINEL_RF_RANDOM_STATE = 42
@@ -73,7 +76,7 @@ SENTINEL_ASSET_ALIASES = {
     "swir2": ("B12", "swir22"),
     "scl": ("SCL", "scl"),
 }
-SENTINEL_FEATURE_NAMES = [
+SENTINEL_SPECTRAL_FEATURE_NAMES = [
     "B02",
     "B03",
     "B04",
@@ -89,6 +92,11 @@ SENTINEL_FEATURE_NAMES = [
     "GEOI",
     "BI",
 ]
+SENTINEL_MODEL_FEATURE_NAMES = (
+    [f"{feature_name}_best" for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES]
+    + [f"{feature_name}_mean" for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES]
+    + ["BARE_OBS", "BARE_SCORE", "LON", "LAT"]
+)
 
 
 def update_status(status_box, message):
@@ -753,7 +761,7 @@ def derive_sentinel_features(bands):
 
 def bare_soil_mask_and_score(features, scl):
     valid_features = np.ones_like(features["NDVI"], dtype=bool)
-    for feature_name in SENTINEL_FEATURE_NAMES:
+    for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES:
         valid_features &= np.isfinite(features[feature_name])
 
     not_vegetated_scl = scl == 5
@@ -761,26 +769,143 @@ def bare_soil_mask_and_score(features, scl):
         valid_features
         & not_vegetated_scl
         & (features["NDVI"] >= -0.05)
-        & (features["NDVI"] <= 0.35)
-        & (features["NDWI"] < 0.10)
+        & (features["NDVI"] <= 0.32)
+        & (features["NDWI"] < 0.08)
         & (features["B04"] > 0.02)
+        & (features["BSI"] > -0.20)
     )
     spectral_bare = (
         valid_features
-        & np.isin(scl, SENTINEL_CLEAR_SCL_CLASSES)
+        & (scl == 7)
         & (features["NDVI"] >= -0.08)
-        & (features["NDVI"] <= 0.40)
-        & (features["NDWI"] < 0.12)
-        & (features["B04"] > 0.02)
-        & (features["BSI"] > -0.25)
+        & (features["NDVI"] <= 0.28)
+        & (features["NDWI"] < 0.06)
+        & (features["B04"] > 0.03)
+        & (features["BSI"] > -0.05)
     )
     bare_mask = strict_bare | spectral_bare
     score = (
         features["BSI"]
-        - np.abs(features["NDVI"]) * 0.5
-        + features["BI"] * 0.05
+        - np.abs(features["NDVI"]) * 0.6
+        - np.maximum(features["NDWI"], 0) * 0.4
+        + features["BI"] * 0.03
     ).astype("float32")
     return bare_mask, score
+
+
+def empty_spectral_accumulators(shape):
+    best_features = {
+        feature_name: np.full(shape, np.nan, dtype="float32")
+        for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES
+    }
+    sum_features = {
+        feature_name: np.zeros(shape, dtype="float32")
+        for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES
+    }
+    return best_features, sum_features
+
+
+def accumulate_bare_spectral_features(
+    best_features,
+    sum_features,
+    bare_count,
+    best_score,
+    features,
+    bare_mask,
+    score,
+):
+    if not np.any(bare_mask):
+        return
+
+    bare_count[bare_mask] = np.minimum(
+        bare_count[bare_mask] + 1,
+        np.iinfo("uint16").max,
+    )
+    for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES:
+        values = features[feature_name]
+        sum_features[feature_name][bare_mask] += values[bare_mask]
+
+    update_mask = bare_mask & (score > best_score)
+    if np.any(update_mask):
+        best_score[update_mask] = score[update_mask]
+        for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES:
+            best_features[feature_name][update_mask] = features[feature_name][update_mask]
+
+
+def model_feature_arrays_from_accumulators(
+    best_features,
+    sum_features,
+    bare_count,
+    best_score,
+    valid_mask,
+    lon,
+    lat,
+):
+    count = bare_count.astype("float32")
+    has_observations = valid_mask & (bare_count > 0)
+    feature_arrays = {}
+
+    for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES:
+        best_key = f"{feature_name}_best"
+        mean_key = f"{feature_name}_mean"
+        feature_arrays[best_key] = np.where(
+            valid_mask,
+            best_features[feature_name],
+            np.nan,
+        ).astype("float32")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mean_values = sum_features[feature_name] / count
+        feature_arrays[mean_key] = np.where(
+            has_observations,
+            mean_values,
+            np.nan,
+        ).astype("float32")
+
+    feature_arrays["BARE_OBS"] = np.where(has_observations, count, np.nan).astype("float32")
+    feature_arrays["BARE_SCORE"] = np.where(valid_mask, best_score, np.nan).astype("float32")
+    feature_arrays["LON"] = np.where(valid_mask, lon, np.nan).astype("float32")
+    feature_arrays["LAT"] = np.where(valid_mask, lat, np.nan).astype("float32")
+    return feature_arrays
+
+
+def grid_wgs84_coordinate_arrays(grid):
+    shape = (grid["height"], grid["width"])
+    lon = np.full(shape, np.nan, dtype="float32")
+    lat = np.full(shape, np.nan, dtype="float32")
+    cols = np.arange(grid["width"], dtype="float64") + 0.5
+    chunk_rows = 512
+
+    for row_start in range(0, grid["height"], chunk_rows):
+        row_end = min(row_start + chunk_rows, grid["height"])
+        rows = np.arange(row_start, row_end, dtype="float64") + 0.5
+        col_grid, row_grid = np.meshgrid(cols, rows)
+        xs = (
+            grid["transform"].c
+            + grid["transform"].a * col_grid
+            + grid["transform"].b * row_grid
+        )
+        ys = (
+            grid["transform"].f
+            + grid["transform"].d * col_grid
+            + grid["transform"].e * row_grid
+        )
+        lons, lats = transform_coordinates(
+            grid["crs"],
+            "EPSG:4326",
+            xs.ravel().tolist(),
+            ys.ravel().tolist(),
+        )
+        lon[row_start:row_end, :] = np.asarray(lons, dtype="float32").reshape(row_end - row_start, grid["width"])
+        lat[row_start:row_end, :] = np.asarray(lats, dtype="float32").reshape(row_end - row_start, grid["width"])
+
+    return lon, lat
+
+
+def mean_bare_observations(bare_count, valid_mask):
+    valid_counts = bare_count[valid_mask]
+    if valid_counts.size == 0:
+        return 0.0
+    return float(np.mean(valid_counts))
 
 
 def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_500_000):
@@ -796,10 +921,7 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
     shape = (grid["height"], grid["width"])
     best_score = np.full(shape, -np.inf, dtype="float32")
     bare_count = np.zeros(shape, dtype="uint16")
-    feature_arrays = {
-        feature_name: np.full(shape, np.nan, dtype="float32")
-        for feature_name in SENTINEL_FEATURE_NAMES
-    }
+    best_features, sum_features = empty_spectral_accumulators(shape)
     failed_items = []
     processed_items = 0
 
@@ -807,11 +929,12 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
         for index, item in enumerate(items, start=1):
             bare_pixels = int(np.count_nonzero(np.isfinite(best_score) & grid["mask"]))
             bare_percent = bare_pixels / max(np.count_nonzero(grid["mask"]), 1) * 100.0
+            mean_observations = mean_bare_observations(bare_count, np.isfinite(best_score) & grid["mask"])
             update_status(
                 status_box,
                 "Componiendo suelo descubierto Sentinel-2 "
                 f"{index:,}/{len(items):,} escenas; pixeles con suelo descubierto "
-                f"{bare_percent:.1f}%.",
+                f"{bare_percent:.1f}%; media de observaciones {mean_observations:.1f}.",
             )
             try:
                 bands = {
@@ -901,23 +1024,29 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
             features = derive_sentinel_features(bands)
             bare_mask, score = bare_soil_mask_and_score(features, scl)
             bare_mask &= grid["mask"]
-            bare_count[bare_mask] = np.minimum(bare_count[bare_mask] + 1, np.iinfo("uint16").max)
-            update_mask = bare_mask & (score > best_score)
-            if np.any(update_mask):
-                best_score[update_mask] = score[update_mask]
-                for feature_name in SENTINEL_FEATURE_NAMES:
-                    feature_arrays[feature_name][update_mask] = features[feature_name][update_mask]
+            accumulate_bare_spectral_features(
+                best_features,
+                sum_features,
+                bare_count,
+                best_score,
+                features,
+                bare_mask,
+                score,
+            )
 
             bare_pixels = int(np.count_nonzero(np.isfinite(best_score) & grid["mask"]))
             bare_percent = bare_pixels / max(np.count_nonzero(grid["mask"]), 1) * 100.0
+            mean_observations = mean_bare_observations(bare_count, np.isfinite(best_score) & grid["mask"])
             if (
                 processed_items >= SENTINEL_MIN_PREDICTION_ITEMS
                 and bare_percent >= SENTINEL_TARGET_BARE_PIXEL_PERCENT
+                and mean_observations >= SENTINEL_TARGET_MEAN_BARE_OBSERVATIONS
             ):
                 update_status(
                     status_box,
                     "Compuesto Sentinel-2 completo con "
-                    f"{bare_percent:.1f}% de pixeles de suelo descubierto.",
+                    f"{bare_percent:.1f}% de pixeles de suelo descubierto y "
+                    f"{mean_observations:.1f} observaciones medias por pixel.",
                 )
                 break
 
@@ -927,8 +1056,16 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
             "No se detectaron pixeles de suelo descubierto Sentinel-2 dentro del poligono. "
             "El modelo experimental se detiene."
         )
-    for feature_name in SENTINEL_FEATURE_NAMES:
-        feature_arrays[feature_name][~valid_bare] = np.nan
+    lon, lat = grid_wgs84_coordinate_arrays(grid)
+    feature_arrays = model_feature_arrays_from_accumulators(
+        best_features,
+        sum_features,
+        bare_count,
+        best_score,
+        valid_bare,
+        lon,
+        lat,
+    )
 
     summary = {
         "sentinel_collection": SENTINEL_COLLECTION,
@@ -941,6 +1078,10 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
         "bare_soil_pixels": int(np.count_nonzero(valid_bare)),
         "bare_soil_pixels_percent": round(
             np.count_nonzero(valid_bare) / max(np.count_nonzero(grid["mask"]), 1) * 100.0,
+            2,
+        ),
+        "mean_bare_observations_per_prediction_pixel": round(
+            mean_bare_observations(bare_count, valid_bare),
             2,
         ),
     }
@@ -971,10 +1112,7 @@ def extract_training_features_from_sentinel(samples, status_box=None):
     )
     items = select_training_sentinel_items(items, samples, SENTINEL_MAX_TRAINING_ITEMS, status_box)
     best_score = np.full(len(samples), -np.inf, dtype="float32")
-    feature_values = {
-        feature_name: np.full(len(samples), np.nan, dtype="float32")
-        for feature_name in SENTINEL_FEATURE_NAMES
-    }
+    best_features, sum_features = empty_spectral_accumulators(len(samples))
     bare_observation_count = np.zeros(len(samples), dtype="uint16")
     failed_items = []
     processed_items = 0
@@ -986,11 +1124,13 @@ def extract_training_features_from_sentinel(samples, status_box=None):
     with rasterio.Env(**SENTINEL_GDAL_OPTIONS):
         for index, item in enumerate(items, start=1):
             valid_so_far = int(np.count_nonzero(np.isfinite(best_score)))
+            mean_observations = mean_bare_observations(bare_observation_count, np.isfinite(best_score))
             update_status(
                 status_box,
                 "Extrayendo Sentinel-2 para entrenamiento "
                 f"{index:,}/{len(items):,} escenas; perfiles validos "
-                f"{valid_so_far:,}/{len(samples):,}.",
+                f"{valid_so_far:,}/{len(samples):,}; media de observaciones "
+                f"{mean_observations:.1f}.",
             )
             try:
                 bands = {
@@ -1015,28 +1155,41 @@ def extract_training_features_from_sentinel(samples, status_box=None):
             processed_items += 1
             features = derive_sentinel_features(bands)
             bare_mask, score = bare_soil_mask_and_score(features, scl)
-            bare_observation_count[bare_mask] = np.minimum(
-                bare_observation_count[bare_mask] + 1,
-                np.iinfo("uint16").max,
+            accumulate_bare_spectral_features(
+                best_features,
+                sum_features,
+                bare_observation_count,
+                best_score,
+                features,
+                bare_mask,
+                score,
             )
-            update_mask = bare_mask & (score > best_score)
-            if np.any(update_mask):
-                best_score[update_mask] = score[update_mask]
-                for feature_name in SENTINEL_FEATURE_NAMES:
-                    feature_values[feature_name][update_mask] = features[feature_name][update_mask]
 
             valid_so_far = int(np.count_nonzero(np.isfinite(best_score)))
+            mean_observations = mean_bare_observations(bare_observation_count, np.isfinite(best_score))
             if (
                 processed_items >= SENTINEL_MIN_TRAINING_ITEMS
                 and valid_so_far >= target_valid_samples
+                and mean_observations >= SENTINEL_TRAINING_TARGET_MEAN_BARE_OBSERVATIONS
             ):
                 update_status(
                     status_box,
                     "Entrenamiento Sentinel-2 listo con "
-                    f"{valid_so_far:,} perfiles WoSIS validos.",
+                    f"{valid_so_far:,} perfiles WoSIS validos y "
+                    f"{mean_observations:.1f} observaciones medias por perfil.",
                 )
                 break
 
+    valid_best = np.isfinite(best_score)
+    feature_values = model_feature_arrays_from_accumulators(
+        best_features,
+        sum_features,
+        bare_observation_count,
+        best_score,
+        valid_best,
+        samples.geometry.x.to_numpy(dtype="float32"),
+        samples.geometry.y.to_numpy(dtype="float32"),
+    )
     feature_frame = pd.DataFrame(feature_values)
     valid = np.isfinite(best_score)
     valid &= feature_frame.replace([np.inf, -np.inf], np.nan).notna().all(axis=1).to_numpy()
@@ -1053,7 +1206,7 @@ def extract_training_features_from_sentinel(samples, status_box=None):
         )
 
     valid_samples = samples.loc[valid].reset_index(drop=True)
-    x_train = feature_frame.loc[valid, SENTINEL_FEATURE_NAMES].to_numpy(dtype="float32")
+    x_train = feature_frame.loc[valid, SENTINEL_MODEL_FEATURE_NAMES].to_numpy(dtype="float32")
     y_train = valid_samples[["sand", "silt", "clay"]].to_numpy(dtype="float32")
     summary = {
         "wosis_complete_profiles": int(len(samples)),
@@ -1076,6 +1229,76 @@ def normalize_texture_fractions(values):
     valid = totals > 0
     normalized[valid] = clipped[valid] / totals[valid, None] * 100.0
     return normalized
+
+
+def neighborhood_mean(values, valid_mask, radius, min_neighbors):
+    values = np.ma.filled(values, np.nan).astype("float32")
+    finite = valid_mask & np.isfinite(values)
+    if radius <= 0 or not np.any(finite):
+        return np.where(finite, values, np.nan).astype("float32")
+
+    weighted_values = np.where(finite, values, 0.0).astype("float32")
+    counts = finite.astype("float32")
+    padded_values = np.pad(weighted_values, radius, mode="constant", constant_values=0.0)
+    padded_counts = np.pad(counts, radius, mode="constant", constant_values=0.0)
+    smoothed_sum = np.zeros_like(values, dtype="float32")
+    smoothed_count = np.zeros_like(values, dtype="float32")
+    height, width = values.shape
+    window_size = radius * 2 + 1
+
+    for row_offset in range(window_size):
+        for col_offset in range(window_size):
+            smoothed_sum += padded_values[
+                row_offset : row_offset + height,
+                col_offset : col_offset + width,
+            ]
+            smoothed_count += padded_counts[
+                row_offset : row_offset + height,
+                col_offset : col_offset + width,
+            ]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        smoothed = smoothed_sum / smoothed_count
+    return np.where(
+        finite & (smoothed_count >= min_neighbors),
+        smoothed,
+        np.where(finite, values, np.nan),
+    ).astype("float32")
+
+
+def smooth_texture_fraction_rasters(fractions, valid_mask):
+    radius = SENTINEL_FRACTION_SMOOTHING_RADIUS_PIXELS
+    if radius <= 0:
+        return fractions, {
+            "fraction_smoothing_applied": False,
+            "fraction_smoothing_radius_pixels": 0,
+        }
+
+    smoothed_arrays = {
+        fraction_name: neighborhood_mean(
+            fractions[fraction_name],
+            valid_mask,
+            radius,
+            SENTINEL_MIN_SMOOTHING_NEIGHBORS,
+        )
+        for fraction_name in ["sand", "silt", "clay"]
+    }
+    stack = np.stack([smoothed_arrays[name] for name in ["sand", "silt", "clay"]], axis=-1)
+    valid = valid_mask & np.isfinite(stack).all(axis=-1)
+    normalized = np.full_like(stack, np.nan, dtype="float32")
+    normalized[valid] = normalize_texture_fractions(stack[valid])
+
+    smoothed_fractions = {
+        "sand": np.ma.masked_invalid(normalized[..., 0]),
+        "silt": np.ma.masked_invalid(normalized[..., 1]),
+        "clay": np.ma.masked_invalid(normalized[..., 2]),
+    }
+    return smoothed_fractions, {
+        "fraction_smoothing_applied": True,
+        "fraction_smoothing_radius_pixels": int(radius),
+        "fraction_smoothing_window_pixels": int(radius * 2 + 1),
+        "fraction_smoothing_min_neighbors": int(SENTINEL_MIN_SMOOTHING_NEIGHBORS),
+    }
 
 
 def spatial_cv_groups(samples):
@@ -1104,7 +1327,10 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
     metrics = {
         "model": "RandomForestRegressor",
         "training_samples": int(len(x_train)),
-        "features": SENTINEL_FEATURE_NAMES,
+        "features": SENTINEL_MODEL_FEATURE_NAMES,
+        "training_mean_sand": round(float(np.mean(y_train[:, 0])), 2),
+        "training_mean_silt": round(float(np.mean(y_train[:, 1])), 2),
+        "training_mean_clay": round(float(np.mean(y_train[:, 2])), 2),
     }
 
     groups = spatial_cv_groups(samples)
@@ -1129,14 +1355,21 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
             except ValueError:
                 pass
         mean_mae = np.mean(np.vstack(fold_mae), axis=0)
+        mean_mae_all = float(np.mean(mean_mae))
         metrics.update(
             {
                 "spatial_cv_folds": int(fold_count),
                 "spatial_cv_mae_sand": round(float(mean_mae[0]), 2),
                 "spatial_cv_mae_silt": round(float(mean_mae[1]), 2),
                 "spatial_cv_mae_clay": round(float(mean_mae[2]), 2),
+                "spatial_cv_mae_mean_fraction": round(mean_mae_all, 2),
             }
         )
+        if mean_mae_all > 15:
+            metrics["model_quality_warning"] = (
+                "La validacion espacial del modelo Sentinel-WoSIS tiene MAE alto; "
+                "use esta capa como apoyo exploratorio y contraste con SoilGrids o muestras locales."
+            )
         if fold_r2:
             mean_r2 = np.nanmean(np.vstack(fold_r2), axis=0)
             metrics.update(
@@ -1152,13 +1385,13 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
     model.fit(x_train, y_train)
     metrics["feature_importance"] = {
         feature_name: round(float(importance), 5)
-        for feature_name, importance in zip(SENTINEL_FEATURE_NAMES, model.feature_importances_)
+        for feature_name, importance in zip(SENTINEL_MODEL_FEATURE_NAMES, model.feature_importances_)
     }
     return model, metrics
 
 
 def predict_texture_fractions(model, feature_arrays, valid_bare, status_box=None):
-    feature_stack = np.stack([feature_arrays[name] for name in SENTINEL_FEATURE_NAMES], axis=-1)
+    feature_stack = np.stack([feature_arrays[name] for name in SENTINEL_MODEL_FEATURE_NAMES], axis=-1)
     valid = valid_bare & np.isfinite(feature_stack).all(axis=-1)
     if not np.any(valid):
         raise RuntimeError(
@@ -1172,7 +1405,10 @@ def predict_texture_fractions(model, feature_arrays, valid_bare, status_box=None
     chunk_size = 50_000
     for start in range(0, len(x_predict), chunk_size):
         end = min(start + chunk_size, len(x_predict))
-        update_status(status_box, f"Prediciendo arena/limo/arcilla Sentinel-WoSIS {end:,}/{len(x_predict):,} pixeles...")
+        update_status(
+            status_box,
+            f"Prediciendo arena/limo/arcilla Sentinel-WoSIS {end:,}/{len(x_predict):,} pixeles...",
+        )
         chunk = x_predict[start:end]
         predictions[start:end] = normalize_texture_fractions(model.predict(chunk))
         tree_predictions = np.stack(
@@ -1212,6 +1448,10 @@ def read_sentinel_wosis_fraction_rasters(poly_geom, status_box=None, max_pixels=
         feature_arrays,
         valid_bare,
         status_box,
+    )
+    fractions, smoothing_summary = smooth_texture_fraction_rasters(
+        fractions,
+        valid_prediction_pixels,
     )
 
     bare_count_out = np.where(grid["mask"], bare_count, 0).astype("uint16")
@@ -1253,6 +1493,7 @@ def read_sentinel_wosis_fraction_rasters(poly_geom, status_box=None, max_pixels=
             "summary": {
                 **training_summary,
                 **model_metrics,
+                **smoothing_summary,
                 "predicted_pixels": int(np.count_nonzero(valid_prediction_pixels)),
             },
         },

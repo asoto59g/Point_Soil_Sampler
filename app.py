@@ -1446,13 +1446,34 @@ def main():
             if sentinel_uncertainty and sentinel_bare:
                 uncertainty_summary = sentinel_uncertainty["summary"]
                 bare_summary = sentinel_bare["summary"]
+                sentinel_details = [
+                    (
+                        f"{uncertainty_summary['training_profiles_with_bare_sentinel']:,} "
+                        "perfiles WoSIS con suelo descubierto"
+                    ),
+                    (
+                        f"{bare_summary['bare_soil_pixels_percent']}% del poligono con "
+                        "compuesto Sentinel-2 descubierto"
+                    ),
+                ]
+                if "mean_bare_observations_per_prediction_pixel" in bare_summary:
+                    sentinel_details.append(
+                        "media "
+                        f"{bare_summary['mean_bare_observations_per_prediction_pixel']} "
+                        "observaciones descubiertas por pixel"
+                    )
+                if "spatial_cv_mae_mean_fraction" in uncertainty_summary:
+                    sentinel_details.append(
+                        "MAE CV espacial medio "
+                        f"{uncertainty_summary['spatial_cv_mae_mean_fraction']} puntos porcentuales"
+                    )
                 st.write(
                     "Sentinel-WoSIS experimental: "
-                    f"{uncertainty_summary['training_profiles_with_bare_sentinel']:,} "
-                    "perfiles WoSIS con suelo descubierto; "
-                    f"{bare_summary['bare_soil_pixels_percent']}% del poligono con "
-                    "compuesto Sentinel-2 descubierto."
+                    + "; ".join(sentinel_details)
+                    + "."
                 )
+                if uncertainty_summary.get("model_quality_warning"):
+                    st.warning(uncertainty_summary["model_quality_warning"])
             render_result_map(result)
             render_downloads(result["files"], result)
 
