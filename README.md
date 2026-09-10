@@ -28,6 +28,25 @@ Fuente alternativa global para comparar resultados. Usa el servicio WCS de ISRIC
 - Resolucion: 250 m
 - Metodo 0-30 cm: promedio ponderado por espesor de cada intervalo
 
+### Experimental Sentinel-2 + WoSIS
+
+Modo experimental para comparar contra las fuentes globales base. Entrena un modelo local `RandomForestRegressor` con observaciones reales WoSIS/ISRIC de arena, limo y arcilla 0-30 cm y covariables Sentinel-2 L2A.
+
+- Entrenamiento: perfiles WoSIS con `sand`, `silt` y `clay`, filtrados a profundidad 0-30 cm y licencias publicas compatibles.
+- Imagenes: escenas Sentinel-2 L2A disponibles en Microsoft Planetary Computer.
+- Compuesto: usa todas las escenas Sentinel-2 encontradas para el area y selecciona por pixel la observacion mas representativa de suelo descubierto.
+- Resolucion de salida: 20 m.
+- Covariables: bandas visibles, NIR, SWIR e indices NDVI, SAVI, MSAVI, BSI, CI, NDWI, GEOI y BI.
+- Validacion: calcula metricas internas con validacion espacial por grupos cuando hay suficientes perfiles distribuidos.
+
+Advertencias:
+
+- Es una prediccion experimental, no una fuente oficial ni un reemplazo de muestreo de campo.
+- Sentinel-2 observa principalmente la superficie; no garantiza representar todo el intervalo 0-30 cm.
+- Humedad, rastrojo, sombra, residuos de cultivo, nubosidad y cobertura vegetal pueden sesgar la estimacion.
+- Si no hay suficientes perfiles WoSIS completos o pixeles Sentinel-2 de suelo descubierto, el proceso se detiene.
+- Para uso operativo, comparar contra OpenLandMap/SoilGrids y revisar la incertidumbre exportada.
+
 ## Metodologia
 
 1. El usuario dibuja un poligono sobre el mapa satelital o sube un archivo GeoJSON.
@@ -65,7 +84,11 @@ Cada corrida crea una carpeta en `salidas/muestreo_YYYYMMDD_HHMMSS/` con:
 
 - `raster_textura_120m.tif` para OpenLandMap-soildb
 - `raster_textura_250m.tif` para SoilGrids250m
+- `raster_textura_20m_sentinel_wosis.tif` para el modo experimental Sentinel-2 + WoSIS
 - `consistencia_intervalo_68_120m.tif` cuando se usa OpenLandMap-soildb
+- `sentinel_suelo_descubierto_observaciones.tif` cuando se usa Sentinel-2 + WoSIS
+- `sentinel_suelo_descubierto_score.tif` cuando se usa Sentinel-2 + WoSIS
+- `incertidumbre_modelo_sentinel_wosis.tif` cuando se usa Sentinel-2 + WoSIS
 - `zonas_texturales.geojson`
 - `poligonos_muestreo.geojson`
 - `puntos_muestreo.geojson`
@@ -95,4 +118,4 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-La app requiere conexion a internet para leer `s3.opengeohub.org` y `maps.isric.org`.
+La app requiere conexion a internet para leer `s3.opengeohub.org`, `maps.isric.org` y, en el modo experimental, `planetarycomputer.microsoft.com`.

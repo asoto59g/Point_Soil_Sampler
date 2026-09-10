@@ -21,6 +21,8 @@ from shapely.geometry import mapping, shape
 import streamlit as st
 from streamlit_folium import st_folium
 
+from experimental_sentinel_wosis import read_sentinel_wosis_fraction_rasters
+
 
 USDA_CLASSES = {
     1: "Arenosa (Sand)",
@@ -98,6 +100,15 @@ SOILGRIDS_SOURCE_DESCRIPTION = (
     "promedio ponderado 0-30 cm desde 0-5, 5-15 y 15-30 cm, resolucion 250 m."
 )
 SOILGRIDS_CATALOG_URL = "https://docs.isric.org/globaldata/soilgrids/wcs.html"
+SENTINEL_WOSIS_SOURCE_DESCRIPTION = (
+    "Modelo experimental Sentinel-2 L2A + WoSIS/ISRIC: entrena Random Forest "
+    "con perfiles reales WoSIS 0-30 cm y covariables multitemporales de suelo "
+    "descubierto Sentinel-2 para predecir arena/limo/arcilla a 20 m."
+)
+SENTINEL_WOSIS_CATALOG_URL = (
+    "https://docs.isric.org/globaldata/wosis/; "
+    "https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a"
+)
 SOILGRIDS_CRS = "ESRI:54052"
 SOILGRIDS_CRS_WKT = (
     'PROJCS["World_Goode_Homolosine_Land",'
@@ -141,6 +152,20 @@ DATA_SOURCES = {
         "resolution_label": "250 m",
         "resolution_slug": "250m",
         "network_host": "maps.isric.org",
+    },
+    "sentinel_wosis": {
+        "name": "Experimental Sentinel-2 + WoSIS (20 m)",
+        "description": SENTINEL_WOSIS_SOURCE_DESCRIPTION,
+        "catalog": SENTINEL_WOSIS_CATALOG_URL,
+        "layers": {
+            "training": "WoSIS latest WFS sand/silt/clay 0-30 cm",
+            "imagery": "Sentinel-2 L2A multitemporal bare-soil composite",
+            "model": "RandomForestRegressor experimental",
+        },
+        "resolution_label": "20 m",
+        "resolution_slug": "20m_sentinel_wosis",
+        "network_host": "maps.isric.org y planetarycomputer.microsoft.com",
+        "experimental": True,
     },
 }
 DEFAULT_SOURCE_KEY = "openlandmap"
@@ -506,6 +531,12 @@ def read_soil_fraction_rasters(poly_geom, source_key, status_box=None):
         return read_openlandmap_fraction_rasters(poly_geom, status_box)
     if source_key == "soilgrids":
         return read_soilgrids_fraction_rasters(poly_geom, status_box)
+    if source_key == "sentinel_wosis":
+        return read_sentinel_wosis_fraction_rasters(
+            poly_geom,
+            status_box=status_box,
+            max_pixels=MAX_PIXELS,
+        )
     raise ValueError(f"Fuente de datos no soportada: {source_key}")
 
 
@@ -1031,6 +1062,29 @@ def render_downloads(files, result):
             1,
             ("Consistencia intervalo 68% (TIF)", "certainty_mask", "image/tiff"),
         )
+    if "sentinel_bare_observations" in files:
+        download_items.insert(
+            1,
+            (
+                "Observaciones suelo descubierto Sentinel-2 (TIF)",
+                "sentinel_bare_observations",
+                "image/tiff",
+            ),
+        )
+    if "sentinel_model_uncertainty" in files:
+        download_items.insert(
+            2,
+            (
+                "Incertidumbre modelo Sentinel-WoSIS (TIF)",
+                "sentinel_model_uncertainty",
+                "image/tiff",
+            ),
+        )
+    if "sentinel_bare_score" in files:
+        download_items.insert(
+            3,
+            ("Score suelo descubierto Sentinel-2 (TIF)", "sentinel_bare_score", "image/tiff"),
+        )
 
     for label, key, mime_type in download_items:
         path = files[key]
@@ -1059,8 +1113,8 @@ def main():
         "textura USDA calculada desde fracciones reales de arena, limo y arcilla."
     )
     st.caption(
-        "Fuentes reales disponibles: OpenLandMap-soildb 120 m y SoilGrids250m / "
-        "ISRIC WCS. No se generan datos simulados."
+        "Fuentes reales disponibles: OpenLandMap-soildb 120 m, SoilGrids250m / "
+        "ISRIC WCS y modo experimental Sentinel-2 + WoSIS. No se generan datos simulados."
     )
 
     col1, col2 = st.columns([1, 1])
@@ -1107,6 +1161,17 @@ def main():
 
         source_config = get_source_config(st.session_state.source_key)
         st.caption(source_config["description"])
+        if source_config.get("experimental"):
+            st.warning(
+                "Modo experimental: entrena un modelo local con perfiles WoSIS y "
+                "compuestos Sentinel-2 de suelo descubierto. Puede ser lento, depende "
+                "de que existan suficientes perfiles WoSIS y pixeles descubiertos, y "
+                "sus predicciones no sustituyen muestreo ni cartografia local."
+            )
+            st.caption(
+                "Recomendacion: usarlo para comparacion exploratoria contra "
+                "OpenLandMap/SoilGrids y revisar la incertidumbre exportada."
+            )
         st.info(
             f"La corrida necesita conexion a {source_config['network_host']}. Si la fuente real no "
             "responde, el proceso se detiene en lugar de inventar datos."
@@ -1149,6 +1214,18 @@ def main():
                     "Consistencia intervalo 68%: "
                     f"{summary['stable_pixels']:,} de {summary['valid_pixels']:,} pixeles "
                     f"({summary['stable_pixels_percent']}%)."
+                )
+            sentinel_uncertainty = result["auxiliary_rasters"].get("sentinel_model_uncertainty")
+            sentinel_bare = result["auxiliary_rasters"].get("sentinel_bare_observations")
+            if sentinel_uncertainty and sentinel_bare:
+                uncertainty_summary = sentinel_uncertainty["summary"]
+                bare_summary = sentinel_bare["summary"]
+                st.write(
+                    "Sentinel-WoSIS experimental: "
+                    f"{uncertainty_summary['training_profiles_with_bare_sentinel']:,} "
+                    "perfiles WoSIS con suelo descubierto; "
+                    f"{bare_summary['bare_soil_pixels_percent']}% del poligono con "
+                    "compuesto Sentinel-2 descubierto."
                 )
             render_result_map(result)
             render_downloads(result["files"], result)
