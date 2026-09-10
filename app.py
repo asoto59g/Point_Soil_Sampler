@@ -336,6 +336,28 @@ def validate_polygon(geometry):
     return poly_geom
 
 
+def geometries_equivalent(left, right):
+    if left == right:
+        return True
+    if not left or not right:
+        return False
+    try:
+        return shape(left).equals(shape(right))
+    except Exception:
+        return False
+
+
+def update_polygon_geometry(geometry):
+    geometry_changed = not geometries_equivalent(
+        st.session_state.polygon_geojson,
+        geometry,
+    )
+    st.session_state.polygon_geojson = geometry
+    if geometry_changed:
+        st.session_state.result = None
+    return geometry_changed
+
+
 def iter_polygon_parts(geometry):
     if geometry is None or geometry.is_empty:
         return
@@ -1105,6 +1127,7 @@ def render_polygon_export_controls():
             file_name=file_name,
             mime="application/geo+json",
             key="download_input_polygon",
+            on_click="ignore",
         )
 
 
@@ -1219,6 +1242,7 @@ def render_downloads(files, result):
             file_name=path.name,
             mime=mime_type,
             key=f"download_{key}",
+            on_click="ignore",
         )
 
 
@@ -1326,23 +1350,22 @@ def main():
         uploaded_file = st.file_uploader("Subir poligono (GeoJSON)", type=["geojson", "json"])
         if uploaded_file is not None:
             try:
+                uploaded_file.seek(0)
                 geometry = extract_geometry(json.load(uploaded_file))
                 validate_polygon(geometry)
-                st.session_state.polygon_geojson = geometry
-                st.session_state.result = None
-                st.success("Poligono cargado correctamente.")
+                if update_polygon_geometry(geometry):
+                    st.success("Poligono cargado correctamente.")
             except (json.JSONDecodeError, ValueError) as exc:
                 st.error(f"No se pudo cargar el poligono: {exc}")
 
         output = render_input_map()
         if output.get("last_active_drawing"):
             new_geom = output["last_active_drawing"]["geometry"]
-            if st.session_state.polygon_geojson != new_geom:
+            if not geometries_equivalent(st.session_state.polygon_geojson, new_geom):
                 try:
                     validate_polygon(new_geom)
-                    st.session_state.polygon_geojson = new_geom
-                    st.session_state.result = None
-                    st.success("Poligono dibujado registrado.")
+                    if update_polygon_geometry(new_geom):
+                        st.success("Poligono dibujado registrado.")
                 except ValueError as exc:
                     st.error(f"El dibujo no es valido: {exc}")
 
