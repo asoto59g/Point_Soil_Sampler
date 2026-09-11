@@ -1506,7 +1506,9 @@ def main():
                 "Las features LON/LAT se reemplazaron por elevacion, pendiente, "
                 "aspecto y curvatura. Cada fraccion tiene su propio RF; "
                 "covariables incluyen red-edge Sentinel-2 (B05-B07, B8A, NDRE) "
-                "y backscatter Sentinel-1 RTC (VV_DB, VH_DB, VV_VH_DB)."
+                "y backscatter Sentinel-1 RTC (VV_DB, VH_DB, VV_VH_DB). "
+                "El compuesto de suelo descubierto prioriza estacion seca "
+                "(dic-abr) y umbrales NDVI/BSI mas estrictos."
             )
         st.info(
             f"La corrida necesita conexion a {source_config['network_host']}. Si la fuente real no "
@@ -1611,6 +1613,17 @@ def main():
                 )
                 if s1_items:
                     sentinel_details.append(f"Sentinel-1 RTC={int(s1_items)} escenas")
+                dry_items = bare_summary.get("dry_season_items_used")
+                if dry_items is None:
+                    dry_items = uncertainty_summary.get("training_dry_season_items_used")
+                if dry_items is not None:
+                    sentinel_details.append(
+                        f"estacion seca={int(dry_items)} escenas"
+                    )
+                if bare_summary.get("bare_soil_policy") or uncertainty_summary.get(
+                    "training_bare_soil_policy"
+                ):
+                    sentinel_details.append("bare-soil estricto + prioridad estacion seca")
                 if "spatial_cv_mae_mean_fraction" in uncertainty_summary:
                     sentinel_details.append(
                         "MAE CV espacial medio "

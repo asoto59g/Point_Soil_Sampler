@@ -25,7 +25,7 @@ SENTINEL_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 SENTINEL_COLLECTION = "sentinel-2-l2a"
 SENTINEL_DATETIME_START = "2016-01-01"
 SENTINEL_TARGET_RESOLUTION_M = 20
-SENTINEL_CLOUD_COVER_LT = 70
+SENTINEL_CLOUD_COVER_LT = 60
 SENTINEL_MIN_WOSIS_SAMPLES = 30
 SENTINEL_WOSIS_BUFFER_KM = 250
 SENTINEL_MAX_TRAINING_PROFILES = 400
@@ -34,9 +34,22 @@ SENTINEL_MAX_PREDICTION_ITEMS = 90
 SENTINEL_MIN_TRAINING_ITEMS = 25
 SENTINEL_TRAINING_TARGET_VALID_SAMPLES = 180
 SENTINEL_MIN_PREDICTION_ITEMS = 25
-SENTINEL_TARGET_BARE_PIXEL_PERCENT = 90.0
+SENTINEL_TARGET_BARE_PIXEL_PERCENT = 85.0
 SENTINEL_TARGET_MEAN_BARE_OBSERVATIONS = 3.0
 SENTINEL_TRAINING_TARGET_MEAN_BARE_OBSERVATIONS = 2.0
+# Costa Rica / Pacific Central America dry season (prefer bare-soil scenes).
+SENTINEL_DRY_SEASON_MONTHS = (12, 1, 2, 3, 4)
+SENTINEL_DRY_SEASON_SCORE_BONUS = 0.12
+# Stricter bare-soil spectral gates (SCL 5 primary, SCL 7 fallback).
+SENTINEL_BARE_SCL5_NDVI_MAX = 0.25
+SENTINEL_BARE_SCL5_NDWI_MAX = 0.05
+SENTINEL_BARE_SCL5_BSI_MIN = -0.10
+SENTINEL_BARE_SCL5_RED_MIN = 0.03
+SENTINEL_BARE_SCL7_NDVI_MAX = 0.18
+SENTINEL_BARE_SCL7_NDWI_MAX = 0.03
+SENTINEL_BARE_SCL7_BSI_MIN = 0.00
+SENTINEL_BARE_SCL7_RED_MIN = 0.04
+SENTINEL_BARE_NDVI_MIN = -0.05
 SENTINEL_FRACTION_SMOOTHING_RADIUS_PIXELS = 2
 SENTINEL_MIN_SMOOTHING_NEIGHBORS = 5
 SENTINEL_MAX_ITEM_FAILURES = 20
@@ -817,6 +830,36 @@ def sentinel_item_datetime(item):
     return item.properties.get("datetime") or ""
 
 
+def sentinel_item_month(item):
+    value = sentinel_item_datetime(item)
+    if not value:
+        return None
+    try:
+        # STAC datetimes look like 2023-01-15T16:12:34.000000Z
+        return int(str(value)[5:7])
+    except (TypeError, ValueError):
+        return None
+
+
+def sentinel_item_is_dry_season(item):
+    month = sentinel_item_month(item)
+    return month in SENTINEL_DRY_SEASON_MONTHS if month is not None else False
+
+
+def order_items_dry_season_first(items):
+    """Prefer dry-season scenes, then lower cloud cover, then newer datetime."""
+    return sorted(
+        items,
+        key=lambda item: (
+            0 if sentinel_item_is_dry_season(item) else 1,
+            sentinel_item_cloud_cover(item),
+            # Newer scenes first within the same season/cloud bucket.
+            "" if not sentinel_item_datetime(item) else sentinel_item_datetime(item),
+        ),
+        reverse=False,
+    )
+
+
 def sentinel_item_group_key(item):
     return (
         item.properties.get("s2:mgrs_tile")
@@ -826,23 +869,27 @@ def sentinel_item_group_key(item):
 
 
 def select_sentinel_items(items, max_items, status_box=None, purpose="modelo"):
-    if not max_items or len(items) <= max_items:
-        items.sort(key=sentinel_item_datetime)
-        return items
+    if not items:
+        return []
+    ordered = order_items_dry_season_first(items)
+    if not max_items or len(ordered) <= max_items:
+        dry_count = sum(1 for item in ordered if sentinel_item_is_dry_season(item))
+        update_status(
+            status_box,
+            "Sentinel-2: "
+            f"{len(ordered):,} escenas para {purpose} "
+            f"({dry_count:,} en estacion seca {SENTINEL_DRY_SEASON_MONTHS}).",
+        )
+        return ordered
 
-    selected = sorted(
-        items,
-        key=lambda item: (
-            sentinel_item_cloud_cover(item),
-            sentinel_item_datetime(item),
-        ),
-    )[:max_items]
-    selected.sort(key=sentinel_item_datetime)
+    selected = ordered[:max_items]
+    dry_count = sum(1 for item in selected if sentinel_item_is_dry_season(item))
     update_status(
         status_box,
         "Sentinel-2 devolvio "
         f"{len(items):,} escenas para {purpose}; se usaran las "
-        f"{len(selected):,} de menor nubosidad para mantener la corrida acotada.",
+        f"{len(selected):,} priorizando estacion seca y menor nubosidad "
+        f"({dry_count:,} en meses {SENTINEL_DRY_SEASON_MONTHS}).",
     )
     return selected
 
@@ -857,8 +904,7 @@ def sentinel_item_coverage_count(item, point_geometries):
 
 def select_training_sentinel_items(items, samples, max_items, status_box=None):
     if not max_items or len(items) <= max_items:
-        items.sort(key=sentinel_item_datetime)
-        return items
+        return order_items_dry_season_first(list(items))
 
     point_geometries = samples.geometry
     groups = {}
@@ -875,7 +921,7 @@ def select_training_sentinel_items(items, samples, max_items, status_box=None):
         update_status(
             status_box,
             "No se pudo calcular cobertura espacial de escenas Sentinel-2; "
-            "se usaran escenas de menor nubosidad.",
+            "se usaran escenas priorizando estacion seca y menor nubosidad.",
         )
         return select_sentinel_items(
             items,
@@ -888,6 +934,7 @@ def select_training_sentinel_items(items, samples, max_items, status_box=None):
         group_items.sort(
             key=lambda record: (
                 -record[0],
+                0 if sentinel_item_is_dry_season(record[1]) else 1,
                 sentinel_item_cloud_cover(record[1]),
                 sentinel_item_datetime(record[1]),
             )
@@ -913,12 +960,14 @@ def select_training_sentinel_items(items, samples, max_items, status_box=None):
                 next_keys.append(group_key)
         ordered_group_keys = next_keys
 
-    selected.sort(key=sentinel_item_datetime)
+    selected = order_items_dry_season_first(selected)
+    dry_count = sum(1 for item in selected if sentinel_item_is_dry_season(item))
     update_status(
         status_box,
         "Sentinel-2 devolvio "
         f"{len(items):,} escenas para entrenamiento; se usaran "
-        f"{len(selected):,} escenas que cubren perfiles de entrenamiento en "
+        f"{len(selected):,} escenas que cubren perfiles "
+        f"({dry_count:,} en estacion seca {SENTINEL_DRY_SEASON_MONTHS}) en "
         f"{len(groups):,} tiles. Escenas sin perfiles cubiertos: {ignored_items:,}.",
     )
     return selected
@@ -1156,7 +1205,7 @@ def derive_sentinel_features(bands):
     }
 
 
-def bare_soil_mask_and_score(features, scl):
+def bare_soil_mask_and_score(features, scl, dry_season=False):
     valid_features = np.ones_like(features["NDVI"], dtype=bool)
     for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES:
         valid_features &= np.isfinite(features[feature_name])
@@ -1165,27 +1214,28 @@ def bare_soil_mask_and_score(features, scl):
     strict_bare = (
         valid_features
         & not_vegetated_scl
-        & (features["NDVI"] >= -0.05)
-        & (features["NDVI"] <= 0.32)
-        & (features["NDWI"] < 0.08)
-        & (features["B04"] > 0.02)
-        & (features["BSI"] > -0.20)
+        & (features["NDVI"] >= SENTINEL_BARE_NDVI_MIN)
+        & (features["NDVI"] <= SENTINEL_BARE_SCL5_NDVI_MAX)
+        & (features["NDWI"] < SENTINEL_BARE_SCL5_NDWI_MAX)
+        & (features["B04"] > SENTINEL_BARE_SCL5_RED_MIN)
+        & (features["BSI"] > SENTINEL_BARE_SCL5_BSI_MIN)
     )
     spectral_bare = (
         valid_features
         & (scl == 7)
-        & (features["NDVI"] >= -0.08)
-        & (features["NDVI"] <= 0.28)
-        & (features["NDWI"] < 0.06)
-        & (features["B04"] > 0.03)
-        & (features["BSI"] > -0.05)
+        & (features["NDVI"] >= SENTINEL_BARE_NDVI_MIN)
+        & (features["NDVI"] <= SENTINEL_BARE_SCL7_NDVI_MAX)
+        & (features["NDWI"] < SENTINEL_BARE_SCL7_NDWI_MAX)
+        & (features["B04"] > SENTINEL_BARE_SCL7_RED_MIN)
+        & (features["BSI"] > SENTINEL_BARE_SCL7_BSI_MIN)
     )
     bare_mask = strict_bare | spectral_bare
     score = (
         features["BSI"]
-        - np.abs(features["NDVI"]) * 0.6
-        - np.maximum(features["NDWI"], 0) * 0.4
+        - np.abs(features["NDVI"]) * 0.75
+        - np.maximum(features["NDWI"], 0) * 0.45
         + features["BI"] * 0.03
+        + (SENTINEL_DRY_SEASON_SCORE_BONUS if dry_season else 0.0)
     ).astype("float32")
     return bare_mask, score
 
@@ -1332,6 +1382,7 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
     best_features, sum_features = empty_spectral_accumulators(shape)
     failed_items = []
     processed_items = 0
+    dry_season_items_used = 0
 
     with rasterio.Env(**SENTINEL_GDAL_OPTIONS):
         for index, item in enumerate(items, start=1):
@@ -1342,7 +1393,8 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
                 status_box,
                 "Componiendo suelo descubierto Sentinel-2 "
                 f"{index:,}/{len(items):,} escenas; pixeles con suelo descubierto "
-                f"{bare_percent:.1f}%; media de observaciones {mean_observations:.1f}.",
+                f"{bare_percent:.1f}%; media de observaciones {mean_observations:.1f} "
+                f"(prioridad estacion seca {SENTINEL_DRY_SEASON_MONTHS}).",
             )
             try:
                 bands = read_item_reflectance_bands_grid(item, grid, Resampling.bilinear)
@@ -1368,8 +1420,15 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
                 continue
 
             processed_items += 1
+            dry_season = sentinel_item_is_dry_season(item)
+            if dry_season:
+                dry_season_items_used += 1
             features = derive_sentinel_features(bands)
-            bare_mask, score = bare_soil_mask_and_score(features, scl)
+            bare_mask, score = bare_soil_mask_and_score(
+                features,
+                scl,
+                dry_season=dry_season,
+            )
             bare_mask &= grid["mask"]
             accumulate_bare_spectral_features(
                 best_features,
@@ -1462,6 +1521,15 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
             mean_bare_observations(bare_count, valid_bare),
             2,
         ),
+        "bare_soil_policy": "strict_scl5_fallback_scl7_dry_season_priority",
+        "dry_season_months": list(SENTINEL_DRY_SEASON_MONTHS),
+        "dry_season_items_used": int(dry_season_items_used),
+        "dry_season_items_fraction": round(
+            dry_season_items_used / max(processed_items, 1),
+            3,
+        ),
+        "bare_soil_ndvi_max_scl5": SENTINEL_BARE_SCL5_NDVI_MAX,
+        "bare_soil_ndvi_max_scl7": SENTINEL_BARE_SCL7_NDVI_MAX,
         **dem_meta,
         **s1_meta,
     }
@@ -1498,6 +1566,7 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
     bare_observation_count = np.zeros(len(samples), dtype="uint16")
     failed_items = []
     processed_items = 0
+    dry_season_items_used = 0
     target_valid_samples = min(
         len(samples),
         max(SENTINEL_MIN_WOSIS_SAMPLES, SENTINEL_TRAINING_TARGET_VALID_SAMPLES),
@@ -1512,7 +1581,8 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
                 "Extrayendo Sentinel-2 para entrenamiento "
                 f"{index:,}/{len(items):,} escenas; perfiles validos "
                 f"{valid_so_far:,}/{len(samples):,}; media de observaciones "
-                f"{mean_observations:.1f}.",
+                f"{mean_observations:.1f} "
+                f"(prioridad estacion seca {SENTINEL_DRY_SEASON_MONTHS}).",
             )
             try:
                 bands = read_item_reflectance_bands_samples(item, samples)
@@ -1528,8 +1598,15 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
                 continue
 
             processed_items += 1
+            dry_season = sentinel_item_is_dry_season(item)
+            if dry_season:
+                dry_season_items_used += 1
             features = derive_sentinel_features(bands)
-            bare_mask, score = bare_soil_mask_and_score(features, scl)
+            bare_mask, score = bare_soil_mask_and_score(
+                features,
+                scl,
+                dry_season=dry_season,
+            )
             accumulate_bare_spectral_features(
                 best_features,
                 sum_features,
@@ -1616,6 +1693,13 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
         },
         "training_sentinel_items_used": int(processed_items),
         "training_sentinel_items_failed": int(len(failed_items)),
+        "training_dry_season_items_used": int(dry_season_items_used),
+        "training_dry_season_items_fraction": round(
+            dry_season_items_used / max(processed_items, 1),
+            3,
+        ),
+        "training_bare_soil_policy": "strict_scl5_fallback_scl7_dry_season_priority",
+        "training_dry_season_months": list(SENTINEL_DRY_SEASON_MONTHS),
         "mean_bare_observations_per_training_profile": round(
             float(np.mean(bare_observation_count[valid])),
             2,

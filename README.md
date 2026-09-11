@@ -76,10 +76,10 @@ Modo experimental para comparar contra las fuentes globales base. Entrena tres `
 - Area Sentinel-2 de entrenamiento: usa el extent total de los perfiles encontrados para extraer covariables Sentinel-2 en esos puntos conocidos.
 - Area de prediccion: estima arena, limo y arcilla solo dentro del poligono original, a 20 m, y unicamente en pixeles Sentinel-2 clasificados como suelo descubierto.
 - Imagenes: escenas Sentinel-2 L2A disponibles en Microsoft Planetary Computer.
-- Seleccion Sentinel-2: para entrenamiento prioriza escenas que cubren perfiles y, dentro de ellas, menor nubosidad; limita la corrida por defecto a 120 escenas para entrenamiento y 90 para prediccion.
+- Seleccion Sentinel-2: prioriza escenas de **estacion seca** (dic–abr en Centroamerica pacifica), luego menor nubosidad; para entrenamiento tambien prioriza cobertura de perfiles. Limite por defecto: 120 escenas de entrenamiento y 90 de prediccion. Nubosidad de escena `< 60%`.
 - Tiempo de ejecucion: la creacion del modelo Sentinel-2 puede tardar bastante mas de 20 minutos porque descarga, lee y procesa muchas escenas y bandas para entrenamiento y prediccion.
 - Acceso Sentinel-2: firma cada asset de Planetary Computer justo antes de leerlo y exige una vigencia minima para evitar tokens vencidos en corridas largas.
-- Compuesto: usa SCL clase 5 como criterio fuerte de suelo no vegetado y un respaldo restringido con SCL clase 7; combina la mejor observacion y la media multitemporal de observaciones de suelo descubierto.
+- Compuesto de suelo descubierto (estricto): SCL clase 5 como criterio principal con NDVI ≤ 0.25, NDWI < 0.05 y BSI > −0.10; respaldo restringido con SCL clase 7 (NDVI ≤ 0.18). Las observaciones de estacion seca reciben un bonus en el score de seleccion de la mejor observacion; se combinan mejor observacion y media multitemporal.
 - Resolucion de salida: 20 m.
 - Covariables: bandas visibles, red-edge (`B05`/`B06`/`B07`/`B8A`), NIR, SWIR e indices NDVI, SAVI, MSAVI, BSI, CI, NDWI, GEOI, BI, NDRE y NDRE2 (mejor observacion y media multitemporal), conteo/score de suelo descubierto, relieve DEM (`ELEV`, `SLOPE_DEG`, `ASPECT_SIN`, `ASPECT_COS`, `CURV`), y backscatter Sentinel-1 RTC (`VV_DB`, `VH_DB`, `VV_VH_DB`).
 - Sentinel-1: coleccion `sentinel-1-rtc` de Planetary Computer; mediana temporal de VV/VH en potencia lineal, convertida a dB; `VV_VH_DB = VV_DB - VH_DB`.
