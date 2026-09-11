@@ -18,11 +18,6 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import rasterio
-from rasterio.enums import Resampling
-from rasterio.features import geometry_mask
-from rasterio.transform import from_origin
-from rasterio.vrt import WarpedVRT
-from rasterio.warp import transform as transform_coordinates
 from shapely.geometry import Point, box, mapping, shape
 
 
@@ -182,6 +177,9 @@ def validate_grid_size(pixel_count, width, height, max_pixels):
 
 
 def build_prediction_grid(poly_geom, max_pixels):
+    from rasterio.features import geometry_mask
+    from rasterio.transform import from_origin
+
     target_crs = estimate_area_crs_for_geometry(poly_geom)
     metric_geom = project_geometry(poly_geom, target_crs)
     minx, miny, maxx, maxy = metric_geom.bounds
@@ -1025,6 +1023,8 @@ def item_asset_href(item, logical_name):
 
 
 def read_asset_grid(href, target_crs, transform, width, height, resampling):
+    from rasterio.vrt import WarpedVRT
+
     with rasterio.open(href) as src:
         with WarpedVRT(
             src,
@@ -1194,6 +1194,8 @@ def model_feature_arrays_from_accumulators(
 
 
 def grid_wgs84_coordinate_arrays(grid):
+    from rasterio.warp import transform as transform_coordinates
+
     shape = (grid["height"], grid["width"])
     lon = np.full(shape, np.nan, dtype="float32")
     lat = np.full(shape, np.nan, dtype="float32")
@@ -1234,6 +1236,8 @@ def mean_bare_observations(bare_count, valid_mask):
 
 
 def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_500_000):
+    from rasterio.enums import Resampling
+
     grid = build_prediction_grid(poly_geom, max_pixels)
     bounds = tuple(float(value) for value in poly_geom.bounds)
     items = search_sentinel_items(
@@ -1414,6 +1418,8 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
 
 
 def read_asset_samples(href, points_wgs84):
+    from rasterio.warp import transform as transform_coordinates
+
     lons = points_wgs84.geometry.x.to_numpy()
     lats = points_wgs84.geometry.y.to_numpy()
     with rasterio.open(href) as src:

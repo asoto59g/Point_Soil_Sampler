@@ -25,11 +25,49 @@ from shapely.geometry import mapping, shape
 import streamlit as st
 from streamlit_folium import st_folium
 
-from experimental_sentinel_wosis import (
-    DEFAULT_TRAINING_SOURCE,
-    TRAINING_SOURCE_OPTIONS,
-    read_sentinel_wosis_fraction_rasters,
-)
+TRAINING_SOURCE_WOSIS = "wosis"
+TRAINING_SOURCE_CALICATAS_CR = "calicatas_cr"
+TRAINING_SOURCE_BOTH = "ambos"
+TRAINING_SOURCE_OPTIONS = {
+    TRAINING_SOURCE_WOSIS: "Solo WoSIS/ISRIC",
+    TRAINING_SOURCE_CALICATAS_CR: "Solo calicatas Costa Rica",
+    TRAINING_SOURCE_BOTH: "WoSIS + calicatas Costa Rica",
+}
+DEFAULT_TRAINING_SOURCE = TRAINING_SOURCE_BOTH
+
+_EXPERIMENTAL_READER = None
+_EXPERIMENTAL_IMPORT_ERROR = None
+
+
+def _scrub_exception_paths(message):
+    text = str(message)
+    text = re.sub(r"/mount/src/[^\s:]+", "<app>", text)
+    text = re.sub(r"/home/[^/\s]+/venv/[^\s:]+", "<venv>", text)
+    text = re.sub(r"[A-Za-z]:\\[^\s:]+", "<path>", text)
+    return text
+
+
+def load_experimental_sentinel_reader():
+    """Importa el modulo experimental solo cuando se necesita."""
+    global _EXPERIMENTAL_READER, _EXPERIMENTAL_IMPORT_ERROR
+    if _EXPERIMENTAL_READER is not None:
+        return _EXPERIMENTAL_READER
+    if _EXPERIMENTAL_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            "No se pudo cargar el modo experimental Sentinel-2. "
+            f"{type(_EXPERIMENTAL_IMPORT_ERROR).__name__}: "
+            f"{_scrub_exception_paths(_EXPERIMENTAL_IMPORT_ERROR)}"
+        ) from _EXPERIMENTAL_IMPORT_ERROR
+    try:
+        from experimental_sentinel_wosis import read_sentinel_wosis_fraction_rasters as reader
+    except Exception as exc:
+        _EXPERIMENTAL_IMPORT_ERROR = exc
+        raise RuntimeError(
+            "No se pudo cargar el modo experimental Sentinel-2. "
+            f"{type(exc).__name__}: {_scrub_exception_paths(exc)}"
+        ) from exc
+    _EXPERIMENTAL_READER = reader
+    return reader
 
 
 USDA_CLASSES = {
@@ -707,7 +745,8 @@ def read_soil_fraction_rasters(
     if source_key == "soilgrids":
         return read_soilgrids_fraction_rasters(poly_geom, status_box)
     if source_key == "sentinel_wosis":
-        return read_sentinel_wosis_fraction_rasters(
+        reader = load_experimental_sentinel_reader()
+        return reader(
             poly_geom,
             status_box=status_box,
             max_pixels=MAX_PIXELS,
@@ -1428,6 +1467,10 @@ def main():
         source_config = get_source_config(st.session_state.source_key)
         st.caption(source_config["description"])
         if source_config.get("experimental"):
+            try:
+                load_experimental_sentinel_reader()
+            except Exception as exc:
+                st.error(str(exc))
             training_options = list(TRAINING_SOURCE_OPTIONS.keys())
             selected_training = st.selectbox(
                 "Perfiles de entrenamiento",
