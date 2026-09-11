@@ -147,10 +147,10 @@ SOILGRIDS_SOURCE_DESCRIPTION = (
 )
 SOILGRIDS_CATALOG_URL = "https://docs.isric.org/globaldata/soilgrids/wcs.html"
 SENTINEL_WOSIS_SOURCE_DESCRIPTION = (
-    "Modelo experimental Sentinel-2 L2A + perfiles locales: entrena Random Forest "
-    "con WoSIS/ISRIC y/o calicatas Costa Rica (arena/limo/arcilla 0-30 cm) y "
-    "covariables multitemporales de suelo descubierto Sentinel-2 para predecir "
-    "arena/limo/arcilla a 20 m."
+    "Modelo experimental Sentinel-2 L2A + perfiles locales + DEM: entrena Random Forest "
+    "con WoSIS/ISRIC y/o calicatas Costa Rica (arena/limo/arcilla 0-30 cm), covariables "
+    "multitemporales de suelo descubierto Sentinel-2 y relieve (DEM CR en Costa Rica; "
+    "Copernicus GLO-30 fuera de CR) para predecir arena/limo/arcilla a 20 m."
 )
 SENTINEL_WOSIS_CATALOG_URL = (
     "https://docs.isric.org/globaldata/wosis/; "
@@ -207,11 +207,12 @@ DATA_SOURCES = {
         "layers": {
             "training": "WoSIS y/o calicatas Costa Rica sand/silt/clay 0-30 cm",
             "imagery": "Sentinel-2 L2A multitemporal bare-soil composite",
+            "dem": "DEM CR (Runoff Drive) o Copernicus GLO-30",
             "model": "RandomForestRegressor experimental",
         },
         "resolution_label": "20 m",
         "resolution_slug": "20m_sentinel_wosis",
-        "network_host": "maps.isric.org y planetarycomputer.microsoft.com",
+        "network_host": "maps.isric.org, planetarycomputer.microsoft.com y drive.google.com (DEM CR)",
         "experimental": True,
     },
 }
@@ -1490,13 +1491,15 @@ def main():
                 st.session_state.result = None
             st.warning(
                 "Modo experimental: entrena un modelo local con perfiles WoSIS y/o "
-                "calicatas Costa Rica, mas compuestos Sentinel-2 de suelo descubierto. "
-                "Puede ser lento, depende de que existan suficientes perfiles y pixeles "
-                "descubiertos, y sus predicciones no sustituyen muestreo ni cartografia local."
+                "calicatas Costa Rica, Sentinel-2 de suelo descubierto y DEM "
+                "(MDE publico CR via Google Drive en Costa Rica; Copernicus GLO-30 "
+                "fuera de CR). Puede ser lento y no sustituye muestreo de campo."
             )
             st.caption(
                 "Recomendacion: usarlo para comparacion exploratoria contra "
-                "OpenLandMap/SoilGrids y revisar la incertidumbre exportada."
+                "OpenLandMap/SoilGrids y revisar la incertidumbre exportada. "
+                "Las features LON/LAT se reemplazaron por elevacion, pendiente, "
+                "aspecto y curvatura."
             )
         st.info(
             f"La corrida necesita conexion a {source_config['network_host']}. Si la fuente real no "
@@ -1583,6 +1586,19 @@ def main():
                         f"{bare_summary['mean_bare_observations_per_prediction_pixel']} "
                         "observaciones descubiertas por pixel"
                     )
+                dem_source = bare_summary.get("dem_source") or uncertainty_summary.get(
+                    "training_dem_source"
+                )
+                if dem_source:
+                    dem_label = {
+                        "cr_drive": "DEM Costa Rica (Drive)",
+                        "copernicus_glo30": "Copernicus GLO-30",
+                    }.get(dem_source, dem_source)
+                    if bare_summary.get("dem_fallback_used") or uncertainty_summary.get(
+                        "training_dem_fallback_used"
+                    ):
+                        dem_label += " (fallback)"
+                    sentinel_details.append(f"relieve={dem_label}")
                 if "spatial_cv_mae_mean_fraction" in uncertainty_summary:
                     sentinel_details.append(
                         "MAE CV espacial medio "

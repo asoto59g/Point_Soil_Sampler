@@ -80,7 +80,10 @@ Modo experimental para comparar contra las fuentes globales base. Entrena un mod
 - Acceso Sentinel-2: firma cada asset de Planetary Computer justo antes de leerlo y exige una vigencia minima para evitar tokens vencidos en corridas largas.
 - Compuesto: usa SCL clase 5 como criterio fuerte de suelo no vegetado y un respaldo restringido con SCL clase 7; combina la mejor observacion y la media multitemporal de observaciones de suelo descubierto.
 - Resolucion de salida: 20 m.
-- Covariables: bandas visibles, NIR, SWIR e indices NDVI, SAVI, MSAVI, BSI, CI, NDWI, GEOI y BI, como mejor observacion y media multitemporal, mas ubicacion y conteo/score de suelo descubierto.
+- Covariables: bandas visibles, NIR, SWIR e indices NDVI, SAVI, MSAVI, BSI, CI, NDWI, GEOI y BI (mejor observacion y media multitemporal), conteo/score de suelo descubierto, y relieve DEM (`ELEV`, `SLOPE_DEG`, `ASPECT_SIN`, `ASPECT_COS`, `CURV`).
+- DEM en Costa Rica: MDE publico del proyecto [Runoff_CRC](https://github.com/asoto59g/Runoff_CRC) (Google Drive, CRTM05 / EPSG:5367). Si falla, usa Copernicus GLO-30.
+- DEM fuera de Costa Rica: Copernicus DEM GLO-30 via Microsoft Planetary Computer.
+- Las coordenadas `LON`/`LAT` ya no se usan como features, para forzar aprendizaje espectro + topografia.
 - Validacion: calcula metricas internas con validacion espacial por grupos cuando hay suficientes perfiles distribuidos.
 - Postproceso: suaviza ligeramente las fracciones arena/limo/arcilla antes de clasificar USDA para reducir ruido salpicado de pixeles aislados.
 
@@ -99,7 +102,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-La app requiere conexion a internet para leer `s3.opengeohub.org`, `maps.isric.org` y, en el modo experimental, `planetarycomputer.microsoft.com`.
+La app requiere conexion a internet para leer `s3.opengeohub.org`, `maps.isric.org` y, en el modo experimental, `planetarycomputer.microsoft.com` y (para DEM de Costa Rica) el MDE publico en Google Drive usado por [Runoff_CRC](https://github.com/asoto59g/Runoff_CRC).
 
 Las corridas largas se ejecutan como procesos en segundo plano dentro del servidor Streamlit. Si el navegador se desconecta temporalmente, por ejemplo al apagar la pantalla, el proceso puede continuar mientras el equipo y el servidor Streamlit sigan activos.
 

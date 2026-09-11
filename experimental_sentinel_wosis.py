@@ -105,7 +105,7 @@ SENTINEL_SPECTRAL_FEATURE_NAMES = [
 SENTINEL_MODEL_FEATURE_NAMES = (
     [f"{feature_name}_best" for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES]
     + [f"{feature_name}_mean" for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES]
-    + ["BARE_OBS", "BARE_SCORE", "LON", "LAT"]
+    + ["BARE_OBS", "BARE_SCORE", "ELEV", "SLOPE_DEG", "ASPECT_SIN", "ASPECT_COS", "CURV"]
 )
 
 
@@ -1163,8 +1163,8 @@ def model_feature_arrays_from_accumulators(
     bare_count,
     best_score,
     valid_mask,
-    lon,
-    lat,
+    lon=None,
+    lat=None,
 ):
     count = bare_count.astype("float32")
     has_observations = valid_mask & (bare_count > 0)
@@ -1188,8 +1188,15 @@ def model_feature_arrays_from_accumulators(
 
     feature_arrays["BARE_OBS"] = np.where(has_observations, count, np.nan).astype("float32")
     feature_arrays["BARE_SCORE"] = np.where(valid_mask, best_score, np.nan).astype("float32")
-    feature_arrays["LON"] = np.where(valid_mask, lon, np.nan).astype("float32")
-    feature_arrays["LAT"] = np.where(valid_mask, lat, np.nan).astype("float32")
+    return feature_arrays
+
+
+def attach_dem_features(feature_arrays, dem_features, valid_mask=None):
+    for feature_name, values in dem_features.items():
+        array = np.asarray(values, dtype="float32")
+        if valid_mask is not None:
+            array = np.where(valid_mask, array, np.nan).astype("float32")
+        feature_arrays[feature_name] = array
     return feature_arrays
 
 
@@ -1385,16 +1392,21 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
             "No se detectaron pixeles de suelo descubierto Sentinel-2 dentro del poligono. "
             "El modelo experimental se detiene."
         )
-    lon, lat = grid_wgs84_coordinate_arrays(grid)
     feature_arrays = model_feature_arrays_from_accumulators(
         best_features,
         sum_features,
         bare_count,
         best_score,
         valid_bare,
-        lon,
-        lat,
     )
+    from dem_covariates import terrain_feature_arrays_for_grid
+
+    dem_features, dem_meta = terrain_feature_arrays_for_grid(
+        poly_geom,
+        grid,
+        status_callback=lambda message: update_status(status_box, message),
+    )
+    feature_arrays = attach_dem_features(feature_arrays, dem_features, valid_mask=valid_bare)
 
     summary = {
         "sentinel_collection": SENTINEL_COLLECTION,
@@ -1413,6 +1425,7 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
             mean_bare_observations(bare_count, valid_bare),
             2,
         ),
+        **dem_meta,
     }
     return feature_arrays, valid_bare, bare_count, best_score, grid, summary
 
@@ -1434,7 +1447,7 @@ def read_asset_samples(href, points_wgs84):
     return np.asarray(sampled, dtype="float32")
 
 
-def extract_training_features_from_sentinel(samples, status_box=None):
+def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=None):
     bounds = tuple(float(value) for value in samples.total_bounds)
     items = search_sentinel_items(
         bounds,
@@ -1518,9 +1531,15 @@ def extract_training_features_from_sentinel(samples, status_box=None):
         bare_observation_count,
         best_score,
         valid_best,
-        samples.geometry.x.to_numpy(dtype="float32"),
-        samples.geometry.y.to_numpy(dtype="float32"),
     )
+    from dem_covariates import terrain_feature_arrays_for_points
+
+    dem_features, dem_meta = terrain_feature_arrays_for_points(
+        samples,
+        poly_geom=poly_geom,
+        status_callback=lambda message: update_status(status_box, message),
+    )
+    feature_values = attach_dem_features(feature_values, dem_features)
     feature_frame = pd.DataFrame(feature_values)
     valid = np.isfinite(best_score)
     valid &= feature_frame.replace([np.inf, -np.inf], np.nan).notna().all(axis=1).to_numpy()
@@ -1560,6 +1579,7 @@ def extract_training_features_from_sentinel(samples, status_box=None):
             float(np.mean(bare_observation_count[valid])),
             2,
         ),
+        **{f"training_{key}": value for key, value in dem_meta.items()},
     }
     return x_train, y_train, valid_samples, summary
 
@@ -1661,7 +1681,7 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
 
     update_status(
         status_box,
-        "Entrenando Random Forest con perfiles locales/WoSIS y covariables Sentinel-2...",
+        "Entrenando Random Forest con perfiles, Sentinel-2 y covariables DEM...",
     )
     model = RandomForestRegressor(
         n_estimators=SENTINEL_RF_TREES,
@@ -1793,6 +1813,7 @@ def read_sentinel_wosis_fraction_rasters(
     x_train, y_train, valid_samples, training_summary = extract_training_features_from_sentinel(
         samples,
         status_box,
+        poly_geom=poly_geom,
     )
     model, model_metrics = train_texture_model(x_train, y_train, valid_samples, status_box)
     feature_arrays, valid_bare, bare_count, best_score, grid, composite_summary = (
