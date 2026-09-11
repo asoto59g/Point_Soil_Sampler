@@ -86,7 +86,7 @@ Modo experimental para comparar contra las fuentes globales base. Entrena tres `
 - DEM en Costa Rica: MDE publico del proyecto [Runoff_CRC](https://github.com/asoto59g/Runoff_CRC) (Google Drive, CRTM05 / EPSG:5367). Si falla, usa Copernicus GLO-30.
 - DEM fuera de Costa Rica: Copernicus DEM GLO-30 via Microsoft Planetary Computer.
 - Las coordenadas `LON`/`LAT` ya no se usan como features, para forzar aprendizaje espectro + topografia + radar.
-- Validacion: calcula metricas internas con validacion espacial por grupos cuando hay suficientes perfiles distribuidos.
+- Validacion: calcula metricas internas con validacion espacial por bloques (MAE y R² por fraccion, desviacion entre folds) cuando hay suficientes perfiles distribuidos; la app muestra un panel con MAE arena/limo/arcilla y las features mas importantes del RF.
 - Postproceso: suaviza ligeramente las fracciones arena/limo/arcilla antes de clasificar USDA para reducir ruido salpicado de pixeles aislados.
 
 ## Datos De Entrada Y Formatos Soportados

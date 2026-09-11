@@ -1403,6 +1403,80 @@ def render_recent_processing_jobs():
                     st.code(job.get("traceback") or job["message"])
 
 
+
+def render_sentinel_spatial_cv_panel(uncertainty_summary):
+    """Show spatial block-CV MAE/R2 and top RF features for the experimental model."""
+    if "spatial_cv_mae_mean_fraction" not in uncertainty_summary:
+        return
+
+    st.markdown("**Validacion espacial (bloques)**")
+    folds = uncertainty_summary.get("spatial_cv_folds")
+    groups = uncertainty_summary.get("spatial_cv_group_count")
+    subtitle = []
+    if folds:
+        subtitle.append(f"{folds} folds")
+    if groups:
+        subtitle.append(f"{groups} bloques espaciales")
+    if subtitle:
+        st.caption(" · ".join(subtitle) + ". MAE en puntos porcentuales de fraccion.")
+
+    if uncertainty_summary.get("spatial_cv_summary"):
+        st.write(uncertainty_summary["spatial_cv_summary"])
+
+    col_sand, col_silt, col_clay, col_mean = st.columns(4)
+    col_sand.metric(
+        "MAE arena",
+        f"{uncertainty_summary.get('spatial_cv_mae_sand', '—')}",
+        (
+            f"±{uncertainty_summary['spatial_cv_mae_std_sand']}"
+            if "spatial_cv_mae_std_sand" in uncertainty_summary
+            else None
+        ),
+    )
+    col_silt.metric(
+        "MAE limo",
+        f"{uncertainty_summary.get('spatial_cv_mae_silt', '—')}",
+        (
+            f"±{uncertainty_summary['spatial_cv_mae_std_silt']}"
+            if "spatial_cv_mae_std_silt" in uncertainty_summary
+            else None
+        ),
+    )
+    col_clay.metric(
+        "MAE arcilla",
+        f"{uncertainty_summary.get('spatial_cv_mae_clay', '—')}",
+        (
+            f"±{uncertainty_summary['spatial_cv_mae_std_clay']}"
+            if "spatial_cv_mae_std_clay" in uncertainty_summary
+            else None
+        ),
+    )
+    col_mean.metric(
+        "MAE medio",
+        f"{uncertainty_summary.get('spatial_cv_mae_mean_fraction', '—')}",
+    )
+
+    if any(
+        key in uncertainty_summary
+        for key in ("spatial_cv_r2_sand", "spatial_cv_r2_silt", "spatial_cv_r2_clay")
+    ):
+        r2_sand = uncertainty_summary.get("spatial_cv_r2_sand", "—")
+        r2_silt = uncertainty_summary.get("spatial_cv_r2_silt", "—")
+        r2_clay = uncertainty_summary.get("spatial_cv_r2_clay", "—")
+        st.caption(
+            f"R² CV espacial — arena: {r2_sand} · limo: {r2_silt} · arcilla: {r2_clay}"
+        )
+
+    top_features = uncertainty_summary.get("top_features") or []
+    if top_features:
+        with st.expander("Features mas importantes del RF", expanded=False):
+            lines = [
+                f"- `{item['feature']}`: {item['importance']:.4f}"
+                for item in top_features
+            ]
+            st.markdown("\n".join(lines))
+
+
 def main():
     st.set_page_config(page_title="Soil Point Sampler", layout="wide")
 
@@ -1627,7 +1701,7 @@ def main():
                 if "spatial_cv_mae_mean_fraction" in uncertainty_summary:
                     sentinel_details.append(
                         "MAE CV espacial medio "
-                        f"{uncertainty_summary['spatial_cv_mae_mean_fraction']} puntos porcentuales"
+                        f"{uncertainty_summary['spatial_cv_mae_mean_fraction']} pp"
                     )
                 if uncertainty_summary.get("training_source_label"):
                     sentinel_details.insert(
@@ -1639,8 +1713,11 @@ def main():
                     + "; ".join(sentinel_details)
                     + "."
                 )
+                render_sentinel_spatial_cv_panel(uncertainty_summary)
                 if uncertainty_summary.get("model_quality_warning"):
                     st.warning(uncertainty_summary["model_quality_warning"])
+                if uncertainty_summary.get("spatial_cv_warning"):
+                    st.info(uncertainty_summary["spatial_cv_warning"])
             render_result_map(result)
             render_downloads(result["files"], result)
 

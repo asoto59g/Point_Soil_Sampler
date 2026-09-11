@@ -1877,11 +1877,14 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
 
     groups = spatial_cv_groups(samples)
     unique_groups = np.unique(groups)
+    metrics["spatial_cv_group_count"] = int(len(unique_groups))
     if len(unique_groups) >= 3:
         fold_count = min(5, len(unique_groups))
         fold_mae = []
         fold_r2 = []
-        for train_index, test_index in GroupKFold(n_splits=fold_count).split(x_train, y_train, groups):
+        for train_index, test_index in GroupKFold(n_splits=fold_count).split(
+            x_train, y_train, groups
+        ):
             fold_ensemble = _fit_fraction_models(
                 x_train[train_index],
                 y_train[train_index],
@@ -1890,15 +1893,26 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
             )
             predictions = fold_ensemble.predict(x_train[test_index])
             fold_mae.append(
-                mean_absolute_error(y_train[test_index], predictions, multioutput="raw_values")
+                mean_absolute_error(
+                    y_train[test_index], predictions, multioutput="raw_values"
+                )
             )
             try:
-                fold_r2.append(
-                    r2_score(y_train[test_index], predictions, multioutput="raw_values")
-                )
+                r2_values = np.asarray(
+                    r2_score(
+                        y_train[test_index],
+                        predictions,
+                        multioutput="raw_values",
+                    ),
+                    dtype="float64",
+                ).reshape(-1)
+                if r2_values.size == 3:
+                    fold_r2.append(r2_values)
             except ValueError:
                 pass
-        mean_mae = np.mean(np.vstack(fold_mae), axis=0)
+        mae_stack = np.vstack(fold_mae)
+        mean_mae = np.mean(mae_stack, axis=0)
+        std_mae = np.std(mae_stack, axis=0)
         mean_mae_all = float(np.mean(mean_mae))
         metrics.update(
             {
@@ -1907,12 +1921,16 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
                 "spatial_cv_mae_silt": round(float(mean_mae[1]), 2),
                 "spatial_cv_mae_clay": round(float(mean_mae[2]), 2),
                 "spatial_cv_mae_mean_fraction": round(mean_mae_all, 2),
+                "spatial_cv_mae_std_sand": round(float(std_mae[0]), 2),
+                "spatial_cv_mae_std_silt": round(float(std_mae[1]), 2),
+                "spatial_cv_mae_std_clay": round(float(std_mae[2]), 2),
             }
         )
         if mean_mae_all > 15:
             metrics["model_quality_warning"] = (
                 "La validacion espacial del modelo Sentinel-WoSIS tiene MAE alto; "
-                "use esta capa como apoyo exploratorio y contraste con SoilGrids o muestras locales."
+                "use esta capa como apoyo exploratorio y contraste con SoilGrids "
+                "o muestras locales."
             )
         if fold_r2:
             mean_r2 = np.nanmean(np.vstack(fold_r2), axis=0)
@@ -1923,8 +1941,15 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
                     "spatial_cv_r2_clay": round(float(mean_r2[2]), 3),
                 }
             )
+        metrics["spatial_cv_summary"] = (
+            f"CV espacial {fold_count} folds / {len(unique_groups)} bloques: "
+            f"MAE arena {mean_mae[0]:.1f}, limo {mean_mae[1]:.1f}, "
+            f"arcilla {mean_mae[2]:.1f} (media {mean_mae_all:.1f} pp)."
+        )
     else:
-        metrics["spatial_cv_warning"] = "No se calculo validacion espacial: grupos insuficientes."
+        metrics["spatial_cv_warning"] = (
+            "No se calculo validacion espacial: grupos insuficientes."
+        )
 
     ensemble = _fit_fraction_models(
         x_train,
@@ -1947,6 +1972,15 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
         }
         for target_name, model in zip(TextureFractionEnsemble.TARGET_NAMES, ensemble.models)
     }
+    top_features = sorted(
+        metrics["feature_importance"].items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )[:8]
+    metrics["top_features"] = [
+        {"feature": name, "importance": importance}
+        for name, importance in top_features
+    ]
     return ensemble, metrics
 
 
