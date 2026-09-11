@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 import os
 import time
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 try:
@@ -22,7 +23,7 @@ from rasterio.features import geometry_mask
 from rasterio.transform import from_origin
 from rasterio.vrt import WarpedVRT
 from rasterio.warp import transform as transform_coordinates
-from shapely.geometry import mapping, shape
+from shapely.geometry import Point, box, mapping, shape
 
 
 SENTINEL_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
@@ -32,6 +33,7 @@ SENTINEL_TARGET_RESOLUTION_M = 20
 SENTINEL_CLOUD_COVER_LT = 70
 SENTINEL_MIN_WOSIS_SAMPLES = 30
 SENTINEL_WOSIS_BUFFER_KM = 250
+SENTINEL_MAX_TRAINING_PROFILES = 400
 SENTINEL_MAX_TRAINING_ITEMS = 120
 SENTINEL_MAX_PREDICTION_ITEMS = 90
 SENTINEL_MIN_TRAINING_ITEMS = 25
@@ -67,6 +69,19 @@ WOSIS_PROPERTIES = {
     "silt": "wosis_latest_silt",
     "clay": "wosis_latest_clay",
 }
+TRAINING_SOURCE_WOSIS = "wosis"
+TRAINING_SOURCE_CALICATAS_CR = "calicatas_cr"
+TRAINING_SOURCE_BOTH = "ambos"
+TRAINING_SOURCE_OPTIONS = {
+    TRAINING_SOURCE_WOSIS: "Solo WoSIS/ISRIC",
+    TRAINING_SOURCE_CALICATAS_CR: "Solo calicatas Costa Rica",
+    TRAINING_SOURCE_BOTH: "WoSIS + calicatas Costa Rica",
+}
+DEFAULT_TRAINING_SOURCE = TRAINING_SOURCE_BOTH
+CALICATAS_CR_CSV_PATH = Path(__file__).resolve().parent / "Calicatas_01_02_21_Costa_Rica.csv"
+CALICATAS_CR_PROFILE_ID_OFFSET = 10_000_000
+CALICATAS_CR_SOURCE_LABEL = "calicatas_cr"
+WOSIS_SOURCE_LABEL = "wosis"
 SENTINEL_ASSET_ALIASES = {
     "blue": ("B02", "blue"),
     "green": ("B03", "green"),
@@ -403,7 +418,21 @@ def weighted_depth_average_for_property(gdf, property_key):
     return gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:4326")
 
 
-def fetch_wosis_texture_samples(poly_geom, status_box=None):
+def normalize_training_fractions(samples):
+    samples = samples.copy()
+    for column in ["sand", "silt", "clay"]:
+        samples[column] = pd.to_numeric(samples[column], errors="coerce")
+    samples = samples.dropna(subset=["sand", "silt", "clay", "geometry"])
+    total = samples[["sand", "silt", "clay"]].sum(axis=1)
+    samples = samples[(total >= 60) & (total <= 140)].copy()
+    if samples.empty:
+        return samples
+    total = samples[["sand", "silt", "clay"]].sum(axis=1)
+    samples[["sand", "silt", "clay"]] = samples[["sand", "silt", "clay"]].div(total, axis=0) * 100.0
+    return samples.reset_index(drop=True)
+
+
+def fetch_wosis_texture_samples(poly_geom, status_box=None, require_minimum=True):
     requests_module = require_experimental_dependencies()["requests"]
     bounds = expanded_wgs84_bounds(poly_geom, SENTINEL_WOSIS_BUFFER_KM)
     update_status(
@@ -426,26 +455,322 @@ def fetch_wosis_texture_samples(poly_geom, status_box=None):
         )
 
     if samples.empty:
-        raise RuntimeError(
-            "WoSIS no devolvio perfiles con arena, limo y arcilla 0-30 cm "
-            "para el area de entrenamiento. El modelo experimental se detiene."
+        if require_minimum:
+            raise RuntimeError(
+                "WoSIS no devolvio perfiles con arena, limo y arcilla 0-30 cm "
+                "para el area de entrenamiento. El modelo experimental se detiene."
+            )
+        return gpd.GeoDataFrame(
+            columns=["profile_id", "sand", "silt", "clay", "source", "geometry"],
+            geometry="geometry",
+            crs="EPSG:4326",
         )
 
     samples = gpd.GeoDataFrame(samples, geometry="geometry", crs="EPSG:4326")
-    for column in ["sand", "silt", "clay"]:
-        samples[column] = pd.to_numeric(samples[column], errors="coerce")
-    samples = samples.dropna(subset=["sand", "silt", "clay", "geometry"])
-    total = samples[["sand", "silt", "clay"]].sum(axis=1)
-    samples = samples[(total >= 60) & (total <= 140)]
-    total = samples[["sand", "silt", "clay"]].sum(axis=1)
-    samples[["sand", "silt", "clay"]] = samples[["sand", "silt", "clay"]].div(total, axis=0) * 100.0
+    samples = normalize_training_fractions(samples)
+    samples["source"] = WOSIS_SOURCE_LABEL
 
-    if len(samples) < SENTINEL_MIN_WOSIS_SAMPLES:
+    if require_minimum and len(samples) < SENTINEL_MIN_WOSIS_SAMPLES:
         raise RuntimeError(
             "WoSIS devolvio muy pocas muestras completas para entrenar "
             f"({len(samples)}; minimo {SENTINEL_MIN_WOSIS_SAMPLES}). "
+            "Amplia el poligono, combina con calicatas Costa Rica o usa OpenLandMap/SoilGrids."
+        )
+    return samples.reset_index(drop=True)
+
+
+def parse_decimal_series(series):
+    cleaned = (
+        series.astype(str)
+        .str.strip()
+        .str.replace(" ", "", regex=False)
+        .str.replace(",", ".", regex=False)
+        .replace({"": np.nan, "nan": np.nan, "None": np.nan})
+    )
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+def find_calicatas_column(columns, candidates):
+    normalized = {str(column).strip().lower(): column for column in columns}
+    for candidate in candidates:
+        if candidate in normalized:
+            return normalized[candidate]
+    for column in columns:
+        lowered = str(column).strip().lower()
+        for candidate in candidates:
+            if candidate in lowered:
+                return column
+    raise RuntimeError(
+        "No se encontro una columna requerida en el CSV de calicatas Costa Rica. "
+        f"Candidatos: {', '.join(candidates)}"
+    )
+
+
+def load_calicatas_cr_texture_samples(poly_geom, status_box=None, require_minimum=True):
+    if not CALICATAS_CR_CSV_PATH.exists():
+        raise RuntimeError(
+            "No se encontro el archivo de calicatas de Costa Rica "
+            f"({CALICATAS_CR_CSV_PATH.name}). Colocalo en la raiz del proyecto."
+        )
+
+    update_status(
+        status_box,
+        "Cargando calicatas Costa Rica con arena/limo/arcilla 0-30 cm "
+        f"en un buffer de {SENTINEL_WOSIS_BUFFER_KM} km...",
+    )
+    raw = pd.read_csv(
+        CALICATAS_CR_CSV_PATH,
+        sep=";",
+        encoding="utf-8",
+        low_memory=False,
+    )
+    id_col = find_calicatas_column(raw.columns, ["id_calicata"])
+    lon_col = find_calicatas_column(raw.columns, ["longitud"])
+    lat_col = find_calicatas_column(raw.columns, ["latitud"])
+    upper_col = find_calicatas_column(raw.columns, ["cmprof. inicial", "prof. inicial"])
+    lower_col = find_calicatas_column(raw.columns, ["prof. final"])
+    sand_col = find_calicatas_column(raw.columns, ["% areana", "% arena", "areana", "arena"])
+    silt_col = find_calicatas_column(raw.columns, ["limo"])
+    clay_col = find_calicatas_column(raw.columns, ["arcilla"])
+    texture_col = None
+    try:
+        texture_col = find_calicatas_column(raw.columns, ["clase textural"])
+    except RuntimeError:
+        texture_col = None
+
+    work = pd.DataFrame(
+        {
+            "calicata_id": pd.to_numeric(raw[id_col], errors="coerce"),
+            "lon": parse_decimal_series(raw[lon_col]),
+            "lat": parse_decimal_series(raw[lat_col]),
+            "upper_depth": parse_decimal_series(raw[upper_col]),
+            "lower_depth": parse_decimal_series(raw[lower_col]),
+            "sand": parse_decimal_series(raw[sand_col]),
+            "silt": parse_decimal_series(raw[silt_col]),
+            "clay": parse_decimal_series(raw[clay_col]),
+        }
+    )
+    if texture_col is not None:
+        work["texture_label"] = raw[texture_col].astype(str).str.strip()
+
+    work = work.dropna(
+        subset=["calicata_id", "lon", "lat", "upper_depth", "lower_depth", "sand", "silt", "clay"]
+    )
+    work = work[(work["sand"] >= 0) & (work["silt"] >= 0) & (work["clay"] >= 0)]
+    work = work[(work["sand"] <= 100) & (work["silt"] <= 100) & (work["clay"] <= 100)]
+    work["overlap_cm"] = (
+        np.minimum(work["lower_depth"], 30.0) - np.maximum(work["upper_depth"], 0.0)
+    ).clip(lower=0)
+    work = work[work["overlap_cm"] > 0]
+    if work.empty:
+        if require_minimum:
+            raise RuntimeError(
+                "El CSV de calicatas Costa Rica no contiene horizontes con arena/limo/arcilla "
+                "que solapen 0-30 cm."
+            )
+        return gpd.GeoDataFrame(
+            columns=["profile_id", "sand", "silt", "clay", "source", "geometry"],
+            geometry="geometry",
+            crs="EPSG:4326",
+        )
+
+    records = []
+    for calicata_id, group in work.groupby("calicata_id", dropna=True):
+        weights = group["overlap_cm"].to_numpy(dtype="float64")
+        if weights.sum() <= 0:
+            continue
+        record = {
+            "profile_id": int(CALICATAS_CR_PROFILE_ID_OFFSET + int(calicata_id)),
+            "sand": float(np.average(group["sand"], weights=weights)),
+            "silt": float(np.average(group["silt"], weights=weights)),
+            "clay": float(np.average(group["clay"], weights=weights)),
+            "source": CALICATAS_CR_SOURCE_LABEL,
+            "geometry": Point(float(group["lon"].iloc[0]), float(group["lat"].iloc[0])),
+        }
+        if "texture_label" in group.columns:
+            labels = group["texture_label"].dropna()
+            labels = labels[labels.astype(str).str.strip() != ""]
+            if not labels.empty:
+                record["texture_label"] = str(labels.mode().iloc[0])
+        records.append(record)
+
+    if not records:
+        if require_minimum:
+            raise RuntimeError(
+                "No se pudieron agregar perfiles 0-30 cm desde calicatas Costa Rica."
+            )
+        return gpd.GeoDataFrame(
+            columns=["profile_id", "sand", "silt", "clay", "source", "geometry"],
+            geometry="geometry",
+            crs="EPSG:4326",
+        )
+
+    samples = gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:4326")
+    samples = normalize_training_fractions(samples)
+
+    bounds = expanded_wgs84_bounds(poly_geom, SENTINEL_WOSIS_BUFFER_KM)
+    train_area = box(*bounds)
+    samples = samples[samples.geometry.within(train_area) | samples.geometry.intersects(train_area)]
+    samples = samples.reset_index(drop=True)
+
+    update_status(
+        status_box,
+        f"Calicatas Costa Rica listas: {len(samples):,} perfiles 0-30 cm "
+        f"dentro del buffer de {SENTINEL_WOSIS_BUFFER_KM} km.",
+    )
+
+    if require_minimum and len(samples) < SENTINEL_MIN_WOSIS_SAMPLES:
+        raise RuntimeError(
+            "Calicatas Costa Rica devolvio muy pocas muestras completas para entrenar "
+            f"({len(samples)}; minimo {SENTINEL_MIN_WOSIS_SAMPLES}). "
+            "Amplia el poligono, combina con WoSIS o usa OpenLandMap/SoilGrids."
+        )
+    return samples
+
+
+def combine_training_samples(frames):
+    valid_frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not valid_frames:
+        return gpd.GeoDataFrame(
+            columns=["profile_id", "sand", "silt", "clay", "source", "geometry"],
+            geometry="geometry",
+            crs="EPSG:4326",
+        )
+    combined = pd.concat(valid_frames, ignore_index=True)
+    combined = gpd.GeoDataFrame(combined, geometry="geometry", crs="EPSG:4326")
+    combined = combined.drop_duplicates(subset=["profile_id"], keep="first")
+    return combined.reset_index(drop=True)
+
+
+def limit_training_samples_near_polygon(samples, poly_geom, max_samples, status_box=None):
+    if samples.empty or max_samples <= 0 or len(samples) <= max_samples:
+        return samples.reset_index(drop=True)
+
+    target_crs = estimate_area_crs_for_geometry(poly_geom)
+    samples_metric = samples.to_crs(target_crs)
+    centroid_metric = project_geometry(poly_geom, target_crs).centroid
+    ranked = samples.copy().reset_index(drop=True)
+    ranked["_distance_to_aoi"] = samples_metric.geometry.distance(centroid_metric).to_numpy()
+    ranked = ranked.sort_values(["_distance_to_aoi", "profile_id"], kind="mergesort")
+
+    if "source" in ranked.columns and ranked["source"].nunique() > 1:
+        selected_ids = []
+        source_groups = {
+            source: group for source, group in ranked.groupby("source", sort=False)
+        }
+        base_quota = max(1, max_samples // len(source_groups))
+        for group in source_groups.values():
+            selected_ids.extend(group.head(min(len(group), base_quota))["profile_id"].tolist())
+        selected = ranked[ranked["profile_id"].isin(selected_ids)]
+        if len(selected) < max_samples:
+            extra = ranked[~ranked["profile_id"].isin(selected_ids)].head(
+                max_samples - len(selected)
+            )
+            selected = pd.concat([selected, extra], ignore_index=True)
+        selected = selected.head(max_samples)
+    else:
+        selected = ranked.head(max_samples)
+
+    selected = gpd.GeoDataFrame(selected, geometry="geometry", crs=samples.crs)
+    selected = selected.drop(columns=["_distance_to_aoi"], errors="ignore")
+    update_status(
+        status_box,
+        "Se limitaron los perfiles de entrenamiento a los "
+        f"{len(selected):,} mas cercanos al poligono "
+        f"(de {len(samples):,} disponibles) para acotar Sentinel-2.",
+    )
+    return selected.reset_index(drop=True)
+
+
+def fetch_training_texture_samples(
+    poly_geom,
+    training_source=DEFAULT_TRAINING_SOURCE,
+    status_box=None,
+):
+    if training_source not in TRAINING_SOURCE_OPTIONS:
+        raise ValueError(
+            f"Fuente de entrenamiento no soportada: {training_source}. "
+            f"Opciones: {', '.join(TRAINING_SOURCE_OPTIONS)}"
+        )
+
+    use_wosis = training_source in {TRAINING_SOURCE_WOSIS, TRAINING_SOURCE_BOTH}
+    use_calicatas = training_source in {
+        TRAINING_SOURCE_CALICATAS_CR,
+        TRAINING_SOURCE_BOTH,
+    }
+    require_each = training_source != TRAINING_SOURCE_BOTH
+
+    frames = []
+    if use_wosis:
+        try:
+            frames.append(
+                fetch_wosis_texture_samples(
+                    poly_geom,
+                    status_box=status_box,
+                    require_minimum=require_each,
+                )
+            )
+        except Exception as exc:
+            if require_each:
+                raise
+            update_status(
+                status_box,
+                "WoSIS no estuvo disponible; se continuara solo con calicatas Costa Rica. "
+                f"Detalle: {exc}",
+            )
+    if use_calicatas:
+        try:
+            frames.append(
+                load_calicatas_cr_texture_samples(
+                    poly_geom,
+                    status_box=status_box,
+                    require_minimum=require_each,
+                )
+            )
+        except Exception as exc:
+            if require_each:
+                raise
+            update_status(
+                status_box,
+                "Calicatas Costa Rica no estuvieron disponibles; se continuara solo con WoSIS. "
+                f"Detalle: {exc}",
+            )
+
+    samples = combine_training_samples(frames)
+    if samples.empty:
+        raise RuntimeError(
+            "No hay perfiles de entrenamiento con arena, limo y arcilla 0-30 cm "
+            f"para la fuente `{TRAINING_SOURCE_OPTIONS[training_source]}`. "
+            "El modelo experimental se detiene."
+        )
+    samples = limit_training_samples_near_polygon(
+        samples,
+        poly_geom,
+        SENTINEL_MAX_TRAINING_PROFILES,
+        status_box=status_box,
+    )
+    if len(samples) < SENTINEL_MIN_WOSIS_SAMPLES:
+        raise RuntimeError(
+            "Hay muy pocas muestras completas para entrenar "
+            f"({len(samples)}; minimo {SENTINEL_MIN_WOSIS_SAMPLES}) con "
+            f"`{TRAINING_SOURCE_OPTIONS[training_source]}`. "
             "Amplia el poligono o usa OpenLandMap/SoilGrids."
         )
+
+    source_counts = samples["source"].value_counts().to_dict() if "source" in samples.columns else {}
+    update_status(
+        status_box,
+        "Perfiles de entrenamiento listos: "
+        f"{len(samples):,} totales"
+        + (
+            " ("
+            + ", ".join(f"{label}={count:,}" for label, count in sorted(source_counts.items()))
+            + ")"
+            if source_counts
+            else ""
+        )
+        + ".",
+    )
     return samples.reset_index(drop=True)
 
 
@@ -524,7 +849,7 @@ def select_training_sentinel_items(items, samples, max_items, status_box=None):
             items,
             max_items,
             status_box=status_box,
-            purpose="entrenamiento WoSIS",
+            purpose="entrenamiento de perfiles",
         )
 
     for group_items in groups.values():
@@ -561,7 +886,7 @@ def select_training_sentinel_items(items, samples, max_items, status_box=None):
         status_box,
         "Sentinel-2 devolvio "
         f"{len(items):,} escenas para entrenamiento; se usaran "
-        f"{len(selected):,} escenas que cubren perfiles WoSIS en "
+        f"{len(selected):,} escenas que cubren perfiles de entrenamiento en "
         f"{len(groups):,} tiles. Escenas sin perfiles cubiertos: {ignored_items:,}.",
     )
     return selected
@@ -1108,7 +1433,7 @@ def extract_training_features_from_sentinel(samples, status_box=None):
     items = search_sentinel_items(
         bounds,
         status_box,
-        purpose="entrenamiento WoSIS",
+        purpose="entrenamiento de perfiles",
     )
     items = select_training_sentinel_items(items, samples, SENTINEL_MAX_TRAINING_ITEMS, status_box)
     best_score = np.full(len(samples), -np.inf, dtype="float32")
@@ -1175,7 +1500,7 @@ def extract_training_features_from_sentinel(samples, status_box=None):
                 update_status(
                     status_box,
                     "Entrenamiento Sentinel-2 listo con "
-                    f"{valid_so_far:,} perfiles WoSIS validos y "
+                    f"{valid_so_far:,} perfiles validos y "
                     f"{mean_observations:.1f} observaciones medias por perfil.",
                 )
                 break
@@ -1196,10 +1521,10 @@ def extract_training_features_from_sentinel(samples, status_box=None):
     valid_count = int(np.count_nonzero(valid))
     if valid_count < SENTINEL_MIN_WOSIS_SAMPLES:
         raise RuntimeError(
-            "No hay suficientes perfiles WoSIS con observaciones Sentinel-2 de suelo descubierto "
-            f"({valid_count}; minimo {SENTINEL_MIN_WOSIS_SAMPLES}). "
+            "No hay suficientes perfiles de entrenamiento con observaciones Sentinel-2 "
+            f"de suelo descubierto ({valid_count}; minimo {SENTINEL_MIN_WOSIS_SAMPLES}). "
             f"Se procesaron {processed_items} escenas Sentinel-2 para "
-            f"{len(samples)} perfiles WoSIS completos y fallaron {len(failed_items)} escenas. "
+            f"{len(samples)} perfiles completos y fallaron {len(failed_items)} escenas. "
             "El modelo experimental se detiene. Prueba con un poligono en una zona con "
             "mas suelo descubierto, amplia el buffer/periodo de entrenamiento en el codigo "
             "o usa OpenLandMap/SoilGrids para esta corrida."
@@ -1208,9 +1533,21 @@ def extract_training_features_from_sentinel(samples, status_box=None):
     valid_samples = samples.loc[valid].reset_index(drop=True)
     x_train = feature_frame.loc[valid, SENTINEL_MODEL_FEATURE_NAMES].to_numpy(dtype="float32")
     y_train = valid_samples[["sand", "silt", "clay"]].to_numpy(dtype="float32")
+    source_counts = (
+        valid_samples["source"].value_counts().to_dict()
+        if "source" in valid_samples.columns
+        else {}
+    )
     summary = {
-        "wosis_complete_profiles": int(len(samples)),
+        "training_complete_profiles": int(len(samples)),
+        "wosis_complete_profiles": int(source_counts.get(WOSIS_SOURCE_LABEL, 0)),
+        "calicatas_cr_complete_profiles": int(
+            source_counts.get(CALICATAS_CR_SOURCE_LABEL, 0)
+        ),
         "training_profiles_with_bare_sentinel": int(len(valid_samples)),
+        "training_profiles_by_source": {
+            str(key): int(value) for key, value in source_counts.items()
+        },
         "training_sentinel_items_used": int(processed_items),
         "training_sentinel_items_failed": int(len(failed_items)),
         "mean_bare_observations_per_training_profile": round(
@@ -1316,7 +1653,10 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
     from sklearn.metrics import mean_absolute_error, r2_score
     from sklearn.model_selection import GroupKFold
 
-    update_status(status_box, "Entrenando Random Forest con perfiles WoSIS y covariables Sentinel-2...")
+    update_status(
+        status_box,
+        "Entrenando Random Forest con perfiles locales/WoSIS y covariables Sentinel-2...",
+    )
     model = RandomForestRegressor(
         n_estimators=SENTINEL_RF_TREES,
         min_samples_leaf=3,
@@ -1432,9 +1772,18 @@ def predict_texture_fractions(model, feature_arrays, valid_bare, status_box=None
     }, uncertainty_grid, valid
 
 
-def read_sentinel_wosis_fraction_rasters(poly_geom, status_box=None, max_pixels=2_500_000):
+def read_sentinel_wosis_fraction_rasters(
+    poly_geom,
+    status_box=None,
+    max_pixels=2_500_000,
+    training_source=DEFAULT_TRAINING_SOURCE,
+):
     require_experimental_dependencies()
-    samples = fetch_wosis_texture_samples(poly_geom, status_box)
+    samples = fetch_training_texture_samples(
+        poly_geom,
+        training_source=training_source,
+        status_box=status_box,
+    )
     x_train, y_train, valid_samples, training_summary = extract_training_features_from_sentinel(
         samples,
         status_box,
@@ -1456,6 +1805,19 @@ def read_sentinel_wosis_fraction_rasters(poly_geom, status_box=None, max_pixels=
 
     bare_count_out = np.where(grid["mask"], bare_count, 0).astype("uint16")
     bare_score_out = np.where(np.isfinite(best_score), best_score, -9999.0).astype("float32")
+    source_counts = (
+        samples["source"].value_counts().to_dict() if "source" in samples.columns else {}
+    )
+    training_summary = {
+        **training_summary,
+        "training_source": training_source,
+        "training_source_label": TRAINING_SOURCE_OPTIONS[training_source],
+        "training_profiles_available": int(len(samples)),
+        "training_profiles_available_by_source": {
+            str(key): int(value) for key, value in source_counts.items()
+        },
+        "calicatas_cr_csv": CALICATAS_CR_CSV_PATH.name,
+    }
     auxiliary_rasters = {
         "sentinel_bare_observations": {
             "filename": "sentinel_suelo_descubierto_observaciones.tif",

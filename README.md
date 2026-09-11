@@ -23,7 +23,7 @@ La app no genera datos simulados: si una fuente remota no responde o no existen 
 - Integra una interfaz Streamlit con fuentes globales de textura y salidas GIS listas para revision.
 - Clasifica textura USDA a partir de fracciones normalizadas de arena, limo y arcilla.
 - Compara fuentes globales base: OpenLandMap-soildb 120 m y SoilGrids250m / ISRIC WCS.
-- Incluye un modo experimental Sentinel-2 + WoSIS que entrena un `RandomForestRegressor` local con perfiles reales WoSIS y covariables multitemporales Sentinel-2 L2A.
+- Incluye un modo experimental Sentinel-2 + perfiles locales que entrena un `RandomForestRegressor` con WoSIS y/o calicatas Costa Rica y covariables multitemporales Sentinel-2 L2A.
 - Exporta capas auxiliares de consistencia, observaciones Sentinel-2 de suelo descubierto, score de suelo descubierto e incertidumbre del modelo experimental.
 
 ## Metodologia Y Algoritmo
@@ -62,17 +62,20 @@ Fuente alternativa global para comparar resultados. Usa el servicio WCS de ISRIC
 - Resolucion: 250 m
 - Metodo 0-30 cm: promedio ponderado por espesor de cada intervalo
 
-### Experimental Sentinel-2 + WoSIS
+### Experimental Sentinel-2 + perfiles (WoSIS / calicatas CR)
 
-Modo experimental para comparar contra las fuentes globales base. Entrena un modelo local `RandomForestRegressor` con observaciones reales WoSIS/ISRIC de arena, limo y arcilla 0-30 cm y covariables Sentinel-2 L2A.
+Modo experimental para comparar contra las fuentes globales base. Entrena un modelo local `RandomForestRegressor` con observaciones reales de arena, limo y arcilla 0-30 cm y covariables Sentinel-2 L2A.
 
-- Entrenamiento: perfiles WoSIS con `sand`, `silt` y `clay`, filtrados a profundidad 0-30 cm y licencias publicas compatibles.
+- Entrenamiento: perfiles WoSIS y/o calicatas Costa Rica (`Calicatas_01_02_21_Costa_Rica.csv`) con `sand`, `silt` y `clay`, filtrados a profundidad 0-30 cm.
+- Selector en la app: `Solo WoSIS/ISRIC`, `Solo calicatas Costa Rica` o `WoSIS + calicatas Costa Rica` (predeterminado).
+- Calicatas CR: ~1,600 perfiles usables a nivel nacional; se filtran al buffer de 250 km y se limitan a los ~400 mas cercanos al poligono para acotar Sentinel-2.
+- La columna `Clase Textural` del CSV se conserva como referencia; el Random Forest predice fracciones y la app clasifica USDA despues.
 - Descarga WoSIS: consulta el WFS por teselas con reintentos para reducir respuestas grandes o mal formadas.
-- Area WoSIS: busca puntos conocidos dentro de un buffer de 250 km alrededor del poligono ingresado.
-- Area Sentinel-2 de entrenamiento: usa el extent total de los perfiles WoSIS encontrados para extraer covariables Sentinel-2 en esos puntos conocidos.
+- Area de entrenamiento: busca puntos conocidos dentro de un buffer de 250 km alrededor del poligono ingresado.
+- Area Sentinel-2 de entrenamiento: usa el extent total de los perfiles encontrados para extraer covariables Sentinel-2 en esos puntos conocidos.
 - Area de prediccion: estima arena, limo y arcilla solo dentro del poligono original, a 20 m, y unicamente en pixeles Sentinel-2 clasificados como suelo descubierto.
 - Imagenes: escenas Sentinel-2 L2A disponibles en Microsoft Planetary Computer.
-- Seleccion Sentinel-2: para entrenamiento prioriza escenas que cubren perfiles WoSIS y, dentro de ellas, menor nubosidad; limita la corrida por defecto a 120 escenas para entrenamiento y 90 para prediccion.
+- Seleccion Sentinel-2: para entrenamiento prioriza escenas que cubren perfiles y, dentro de ellas, menor nubosidad; limita la corrida por defecto a 120 escenas para entrenamiento y 90 para prediccion.
 - Tiempo de ejecucion: la creacion del modelo Sentinel-2 puede tardar bastante mas de 20 minutos porque descarga, lee y procesa muchas escenas y bandas para entrenamiento y prediccion.
 - Acceso Sentinel-2: firma cada asset de Planetary Computer justo antes de leerlo y exige una vigencia minima para evitar tokens vencidos en corridas largas.
 - Compuesto: usa SCL clase 5 como criterio fuerte de suelo no vegetado y un respaldo restringido con SCL clase 7; combina la mejor observacion y la media multitemporal de observaciones de suelo descubierto.
@@ -156,7 +159,7 @@ Cada punto se ubica en el centroide del poligono textural correspondiente. El CS
 - Las fuentes globales no sustituyen muestreo de campo, cartografia local ni validacion agronomica.
 - Sentinel-2 observa principalmente la superficie; no garantiza representar todo el intervalo 0-30 cm.
 - Humedad, rastrojo, sombra, residuos de cultivo, nubosidad y cobertura vegetal pueden sesgar la estimacion.
-- El modo Sentinel-2 + WoSIS depende de que existan suficientes perfiles WoSIS completos y pixeles Sentinel-2 de suelo descubierto.
+- El modo Sentinel-2 experimental depende de que existan suficientes perfiles (WoSIS y/o calicatas CR) y pixeles Sentinel-2 de suelo descubierto.
 - Las capas remotas pueden cambiar, quedar temporalmente fuera de servicio o limitar respuestas.
 - En ejecucion local, el equipo no debe entrar en suspension durante corridas Sentinel-2 largas; apagar solo la pantalla no deberia detener el job si el servidor Streamlit sigue activo.
 - Para uso operativo, conviene comparar OpenLandMap/SoilGrids/Sentinel-WoSIS y revisar incertidumbre o consistencia exportada.

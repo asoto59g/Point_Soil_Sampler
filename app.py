@@ -25,7 +25,11 @@ from shapely.geometry import mapping, shape
 import streamlit as st
 from streamlit_folium import st_folium
 
-from experimental_sentinel_wosis import read_sentinel_wosis_fraction_rasters
+from experimental_sentinel_wosis import (
+    DEFAULT_TRAINING_SOURCE,
+    TRAINING_SOURCE_OPTIONS,
+    read_sentinel_wosis_fraction_rasters,
+)
 
 
 USDA_CLASSES = {
@@ -105,9 +109,10 @@ SOILGRIDS_SOURCE_DESCRIPTION = (
 )
 SOILGRIDS_CATALOG_URL = "https://docs.isric.org/globaldata/soilgrids/wcs.html"
 SENTINEL_WOSIS_SOURCE_DESCRIPTION = (
-    "Modelo experimental Sentinel-2 L2A + WoSIS/ISRIC: entrena Random Forest "
-    "con perfiles reales WoSIS 0-30 cm y covariables multitemporales de suelo "
-    "descubierto Sentinel-2 para predecir arena/limo/arcilla a 20 m."
+    "Modelo experimental Sentinel-2 L2A + perfiles locales: entrena Random Forest "
+    "con WoSIS/ISRIC y/o calicatas Costa Rica (arena/limo/arcilla 0-30 cm) y "
+    "covariables multitemporales de suelo descubierto Sentinel-2 para predecir "
+    "arena/limo/arcilla a 20 m."
 )
 SENTINEL_WOSIS_CATALOG_URL = (
     "https://docs.isric.org/globaldata/wosis/; "
@@ -158,11 +163,11 @@ DATA_SOURCES = {
         "network_host": "maps.isric.org",
     },
     "sentinel_wosis": {
-        "name": "Experimental Sentinel-2 + WoSIS (20 m)",
+        "name": "Experimental Sentinel-2 + perfiles (20 m)",
         "description": SENTINEL_WOSIS_SOURCE_DESCRIPTION,
         "catalog": SENTINEL_WOSIS_CATALOG_URL,
         "layers": {
-            "training": "WoSIS latest WFS sand/silt/clay 0-30 cm",
+            "training": "WoSIS y/o calicatas Costa Rica sand/silt/clay 0-30 cm",
             "imagery": "Sentinel-2 L2A multitemporal bare-soil composite",
             "model": "RandomForestRegressor experimental",
         },
@@ -226,10 +231,15 @@ class BackgroundStatus:
         update_processing_job_in_registry(self.registry, self.job_id, message=message)
 
 
-def run_processing_job(registry, job_id, geometry, source_key):
+def run_processing_job(registry, job_id, geometry, source_key, training_source=None):
     status = BackgroundStatus(registry, job_id)
     try:
-        result = process_sampling(geometry, source_key=source_key, status_box=status)
+        result = process_sampling(
+            geometry,
+            source_key=source_key,
+            status_box=status,
+            training_source=training_source,
+        )
     except Exception as exc:
         update_processing_job_in_registry(
             registry,
@@ -252,14 +262,27 @@ def run_processing_job(registry, job_id, geometry, source_key):
     )
 
 
-def start_processing_job(geometry, source_key):
+def start_processing_job(geometry, source_key, training_source=None):
     source_config = get_source_config(source_key)
     job_id = uuid.uuid4().hex[:12]
     job_geometry = json.loads(json.dumps(geometry))
+    resolved_training_source = None
+    if source_config.get("experimental"):
+        resolved_training_source = training_source or DEFAULT_TRAINING_SOURCE
+        if resolved_training_source not in TRAINING_SOURCE_OPTIONS:
+            raise ValueError(
+                f"Fuente de entrenamiento no soportada: {resolved_training_source}"
+            )
     job = {
         "id": job_id,
         "source_key": source_key,
         "source_name": source_config["name"],
+        "training_source": resolved_training_source,
+        "training_source_label": (
+            TRAINING_SOURCE_OPTIONS.get(resolved_training_source)
+            if resolved_training_source
+            else None
+        ),
         "state": "running",
         "message": "Iniciando procesamiento...",
         "error": None,
@@ -272,7 +295,7 @@ def start_processing_job(geometry, source_key):
     registry = processing_registry()
     thread = threading.Thread(
         target=run_processing_job,
-        args=(registry, job_id, job_geometry, source_key),
+        args=(registry, job_id, job_geometry, source_key, resolved_training_source),
         name=f"soil-sampler-job-{job_id}",
         daemon=True,
     )
@@ -673,7 +696,12 @@ def read_soilgrids_fraction_rasters(poly_geom, status_box=None):
     return arrays, out_transform, out_crs, pixel_count, {}
 
 
-def read_soil_fraction_rasters(poly_geom, source_key, status_box=None):
+def read_soil_fraction_rasters(
+    poly_geom,
+    source_key,
+    status_box=None,
+    training_source=None,
+):
     if source_key == "openlandmap":
         return read_openlandmap_fraction_rasters(poly_geom, status_box)
     if source_key == "soilgrids":
@@ -683,6 +711,7 @@ def read_soil_fraction_rasters(poly_geom, source_key, status_box=None):
             poly_geom,
             status_box=status_box,
             max_pixels=MAX_PIXELS,
+            training_source=training_source or DEFAULT_TRAINING_SOURCE,
         )
     raise ValueError(f"Fuente de datos no soportada: {source_key}")
 
@@ -998,13 +1027,19 @@ def write_outputs(
     return files, output_dir
 
 
-def process_sampling(geometry, source_key=DEFAULT_SOURCE_KEY, status_box=None):
+def process_sampling(
+    geometry,
+    source_key=DEFAULT_SOURCE_KEY,
+    status_box=None,
+    training_source=None,
+):
     source_config = get_source_config(source_key)
     poly_geom = validate_polygon(geometry)
     fractions, transform, crs, pixel_count, auxiliary_rasters = read_soil_fraction_rasters(
         poly_geom,
         source_key,
         status_box,
+        training_source=training_source,
     )
 
     if status_box:
@@ -1044,6 +1079,10 @@ def process_sampling(geometry, source_key=DEFAULT_SOURCE_KEY, status_box=None):
         "source_key": source_key,
         "source_name": source_config["name"],
         "resolution_label": source_config["resolution_label"],
+        "training_source": training_source,
+        "training_source_label": (
+            TRAINING_SOURCE_OPTIONS.get(training_source) if training_source else None
+        ),
         "auxiliary_rasters": auxiliary_rasters,
     }
 
@@ -1330,6 +1369,8 @@ def main():
         st.session_state.result = None
     if "source_key" not in st.session_state:
         st.session_state.source_key = DEFAULT_SOURCE_KEY
+    if "training_source" not in st.session_state:
+        st.session_state.training_source = DEFAULT_TRAINING_SOURCE
     if "processing_job_id" not in st.session_state:
         st.session_state.processing_job_id = None
 
@@ -1387,11 +1428,28 @@ def main():
         source_config = get_source_config(st.session_state.source_key)
         st.caption(source_config["description"])
         if source_config.get("experimental"):
+            training_options = list(TRAINING_SOURCE_OPTIONS.keys())
+            selected_training = st.selectbox(
+                "Perfiles de entrenamiento",
+                training_options,
+                index=training_options.index(st.session_state.training_source)
+                if st.session_state.training_source in TRAINING_SOURCE_OPTIONS
+                else training_options.index(DEFAULT_TRAINING_SOURCE),
+                format_func=lambda key: TRAINING_SOURCE_OPTIONS[key],
+                help=(
+                    "Las calicatas Costa Rica aportan ~1,600 perfiles 0-30 cm con "
+                    "arena/limo/arcilla. Se filtran al buffer de 250 km y se usan "
+                    "hasta ~400 perfiles cercanos al poligono."
+                ),
+            )
+            if selected_training != st.session_state.training_source:
+                st.session_state.training_source = selected_training
+                st.session_state.result = None
             st.warning(
-                "Modo experimental: entrena un modelo local con perfiles WoSIS y "
-                "compuestos Sentinel-2 de suelo descubierto. Puede ser lento, depende "
-                "de que existan suficientes perfiles WoSIS y pixeles descubiertos, y "
-                "sus predicciones no sustituyen muestreo ni cartografia local."
+                "Modo experimental: entrena un modelo local con perfiles WoSIS y/o "
+                "calicatas Costa Rica, mas compuestos Sentinel-2 de suelo descubierto. "
+                "Puede ser lento, depende de que existan suficientes perfiles y pixeles "
+                "descubiertos, y sus predicciones no sustituyen muestreo ni cartografia local."
             )
             st.caption(
                 "Recomendacion: usarlo para comparacion exploratoria contra "
@@ -1410,9 +1468,15 @@ def main():
             else:
                 try:
                     validate_polygon(st.session_state.polygon_geojson)
+                    training_source = (
+                        st.session_state.training_source
+                        if source_config.get("experimental")
+                        else None
+                    )
                     st.session_state.processing_job_id = start_processing_job(
                         st.session_state.polygon_geojson,
                         st.session_state.source_key,
+                        training_source=training_source,
                     )
                     st.session_state.result = None
                     rerun_app()
@@ -1425,7 +1489,7 @@ def main():
         if st.session_state.result:
             result = st.session_state.result
             st.write(f"Carpeta de salida: `{result['output_dir']}`")
-            st.write(
+            source_line = (
                 f"Fuente: {result['source_name']} | "
                 f"Resolucion: {result['resolution_label']} | "
                 f"Pixeles validos: {result['valid_pixels']:,} | "
@@ -1433,6 +1497,9 @@ def main():
                 f"Poligonos de muestreo: {len(result['sampling_units']):,} | "
                 f"Puntos: {len(result['points']):,}"
             )
+            if result.get("training_source_label"):
+                source_line += f" | Entrenamiento: {result['training_source_label']}"
+            st.write(source_line)
             certainty = result["auxiliary_rasters"].get("certainty_mask")
             if certainty:
                 summary = certainty["summary"]
@@ -1446,11 +1513,22 @@ def main():
             if sentinel_uncertainty and sentinel_bare:
                 uncertainty_summary = sentinel_uncertainty["summary"]
                 bare_summary = sentinel_bare["summary"]
+                training_by_source = uncertainty_summary.get("training_profiles_by_source") or {}
+                source_bits = []
+                if training_by_source.get("wosis"):
+                    source_bits.append(f"WoSIS={training_by_source['wosis']:,}")
+                if training_by_source.get("calicatas_cr"):
+                    source_bits.append(
+                        f"calicatas CR={training_by_source['calicatas_cr']:,}"
+                    )
+                profiles_label = (
+                    f"{uncertainty_summary['training_profiles_with_bare_sentinel']:,} "
+                    "perfiles con suelo descubierto"
+                )
+                if source_bits:
+                    profiles_label += f" ({', '.join(source_bits)})"
                 sentinel_details = [
-                    (
-                        f"{uncertainty_summary['training_profiles_with_bare_sentinel']:,} "
-                        "perfiles WoSIS con suelo descubierto"
-                    ),
+                    profiles_label,
                     (
                         f"{bare_summary['bare_soil_pixels_percent']}% del poligono con "
                         "compuesto Sentinel-2 descubierto"
@@ -1467,8 +1545,13 @@ def main():
                         "MAE CV espacial medio "
                         f"{uncertainty_summary['spatial_cv_mae_mean_fraction']} puntos porcentuales"
                     )
+                if uncertainty_summary.get("training_source_label"):
+                    sentinel_details.insert(
+                        0,
+                        f"entrenamiento={uncertainty_summary['training_source_label']}",
+                    )
                 st.write(
-                    "Sentinel-WoSIS experimental: "
+                    "Sentinel experimental: "
                     + "; ".join(sentinel_details)
                     + "."
                 )
