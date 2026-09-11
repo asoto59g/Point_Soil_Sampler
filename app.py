@@ -1408,7 +1408,9 @@ def render_current_processing_job():
         st.info(job["message"])
         st.caption(
             f"Proceso en segundo plano: {job['source_name']} | "
-            f"Inicio: {job['started_at']} | Ultima actualizacion: {job['updated_at']}"
+            f"Inicio: {job['started_at']} | Ultima actualizacion: {job['updated_at']}. "
+            "Si la pagina deja de actualizarse sola, usa «Actualizar estado» o "
+            "«Seguir proceso» en Procesos recientes; el muestreo sigue corriendo."
         )
         if st.button("Actualizar estado", key="refresh_processing_job"):
             rerun_app()
