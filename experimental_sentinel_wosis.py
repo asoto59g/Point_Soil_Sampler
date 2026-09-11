@@ -25,23 +25,38 @@ SENTINEL_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 SENTINEL_COLLECTION = "sentinel-2-l2a"
 SENTINEL_DATETIME_START = "2016-01-01"
 SENTINEL_TARGET_RESOLUTION_M = 20
-SENTINEL_CLOUD_COVER_LT = 70
+SENTINEL_CLOUD_COVER_LT = 60
 SENTINEL_MIN_WOSIS_SAMPLES = 30
 SENTINEL_WOSIS_BUFFER_KM = 250
 SENTINEL_MAX_TRAINING_PROFILES = 400
-SENTINEL_MAX_TRAINING_ITEMS = 120
-SENTINEL_MAX_PREDICTION_ITEMS = 90
-SENTINEL_MIN_TRAINING_ITEMS = 25
-SENTINEL_TRAINING_TARGET_VALID_SAMPLES = 180
-SENTINEL_MIN_PREDICTION_ITEMS = 25
-SENTINEL_TARGET_BARE_PIXEL_PERCENT = 90.0
-SENTINEL_TARGET_MEAN_BARE_OBSERVATIONS = 3.0
-SENTINEL_TRAINING_TARGET_MEAN_BARE_OBSERVATIONS = 2.0
+SENTINEL_MAX_TRAINING_ITEMS = int(os.getenv("SENTINEL_MAX_TRAINING_ITEMS", "120"))
+SENTINEL_MAX_PREDICTION_ITEMS = int(os.getenv("SENTINEL_MAX_PREDICTION_ITEMS", "90"))
+SENTINEL_MIN_TRAINING_ITEMS = int(os.getenv("SENTINEL_MIN_TRAINING_ITEMS", "25"))
+SENTINEL_TRAINING_TARGET_VALID_SAMPLES = int(os.getenv("SENTINEL_TRAINING_TARGET_VALID_SAMPLES", "180"))
+SENTINEL_MIN_PREDICTION_ITEMS = int(os.getenv("SENTINEL_MIN_PREDICTION_ITEMS", "25"))
+SENTINEL_TARGET_BARE_PIXEL_PERCENT = float(os.getenv("SENTINEL_TARGET_BARE_PIXEL_PERCENT", "85.0"))
+SENTINEL_TARGET_MEAN_BARE_OBSERVATIONS = float(os.getenv("SENTINEL_TARGET_MEAN_BARE_OBSERVATIONS", "3.0"))
+SENTINEL_TRAINING_TARGET_MEAN_BARE_OBSERVATIONS = float(
+    os.getenv("SENTINEL_TRAINING_TARGET_MEAN_BARE_OBSERVATIONS", "2.0")
+)
+# Costa Rica / Pacific Central America dry season (prefer bare-soil scenes).
+SENTINEL_DRY_SEASON_MONTHS = (12, 1, 2, 3, 4)
+SENTINEL_DRY_SEASON_SCORE_BONUS = 0.12
+# Stricter bare-soil spectral gates (SCL 5 primary, SCL 7 fallback).
+SENTINEL_BARE_SCL5_NDVI_MAX = 0.25
+SENTINEL_BARE_SCL5_NDWI_MAX = 0.05
+SENTINEL_BARE_SCL5_BSI_MIN = -0.10
+SENTINEL_BARE_SCL5_RED_MIN = 0.03
+SENTINEL_BARE_SCL7_NDVI_MAX = 0.18
+SENTINEL_BARE_SCL7_NDWI_MAX = 0.03
+SENTINEL_BARE_SCL7_BSI_MIN = 0.00
+SENTINEL_BARE_SCL7_RED_MIN = 0.04
+SENTINEL_BARE_NDVI_MIN = -0.05
 SENTINEL_FRACTION_SMOOTHING_RADIUS_PIXELS = 2
 SENTINEL_MIN_SMOOTHING_NEIGHBORS = 5
 SENTINEL_MAX_ITEM_FAILURES = 20
 SENTINEL_SIGNED_URL_MIN_TTL_SECONDS = 10 * 60
-SENTINEL_RF_TREES = 300
+SENTINEL_RF_TREES = int(os.getenv("SENTINEL_RF_TREES", "300"))
 SENTINEL_RF_RANDOM_STATE = 42
 SENTINEL_GDAL_OPTIONS = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
@@ -81,16 +96,37 @@ SENTINEL_ASSET_ALIASES = {
     "blue": ("B02", "blue"),
     "green": ("B03", "green"),
     "red": ("B04", "red"),
+    "rededge1": ("B05", "rededge1"),
+    "rededge2": ("B06", "rededge2"),
+    "rededge3": ("B07", "rededge3"),
     "nir": ("B08", "nir"),
+    "nir08": ("B8A", "nir08"),
     "swir1": ("B11", "swir16"),
     "swir2": ("B12", "swir22"),
     "scl": ("SCL", "scl"),
 }
+# Reflectance assets read per scene (excluding SCL).
+SENTINEL_REFLECTANCE_BANDS = (
+    "blue",
+    "green",
+    "red",
+    "rededge1",
+    "rededge2",
+    "rededge3",
+    "nir",
+    "nir08",
+    "swir1",
+    "swir2",
+)
 SENTINEL_SPECTRAL_FEATURE_NAMES = [
     "B02",
     "B03",
     "B04",
+    "B05",
+    "B06",
+    "B07",
     "B08",
+    "B8A",
     "B11",
     "B12",
     "NDVI",
@@ -101,11 +137,24 @@ SENTINEL_SPECTRAL_FEATURE_NAMES = [
     "NDWI",
     "GEOI",
     "BI",
+    "NDRE",
+    "NDRE2",
 ]
 SENTINEL_MODEL_FEATURE_NAMES = (
     [f"{feature_name}_best" for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES]
     + [f"{feature_name}_mean" for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES]
-    + ["BARE_OBS", "BARE_SCORE", "ELEV", "SLOPE_DEG", "ASPECT_SIN", "ASPECT_COS", "CURV"]
+    + [
+        "BARE_OBS",
+        "BARE_SCORE",
+        "ELEV",
+        "SLOPE_DEG",
+        "ASPECT_SIN",
+        "ASPECT_COS",
+        "CURV",
+        "VV_DB",
+        "VH_DB",
+        "VV_VH_DB",
+    ]
 )
 
 
@@ -783,6 +832,36 @@ def sentinel_item_datetime(item):
     return item.properties.get("datetime") or ""
 
 
+def sentinel_item_month(item):
+    value = sentinel_item_datetime(item)
+    if not value:
+        return None
+    try:
+        # STAC datetimes look like 2023-01-15T16:12:34.000000Z
+        return int(str(value)[5:7])
+    except (TypeError, ValueError):
+        return None
+
+
+def sentinel_item_is_dry_season(item):
+    month = sentinel_item_month(item)
+    return month in SENTINEL_DRY_SEASON_MONTHS if month is not None else False
+
+
+def order_items_dry_season_first(items):
+    """Prefer dry-season scenes, then lower cloud cover, then newer datetime."""
+    return sorted(
+        items,
+        key=lambda item: (
+            0 if sentinel_item_is_dry_season(item) else 1,
+            sentinel_item_cloud_cover(item),
+            # Newer scenes first within the same season/cloud bucket.
+            "" if not sentinel_item_datetime(item) else sentinel_item_datetime(item),
+        ),
+        reverse=False,
+    )
+
+
 def sentinel_item_group_key(item):
     return (
         item.properties.get("s2:mgrs_tile")
@@ -792,23 +871,27 @@ def sentinel_item_group_key(item):
 
 
 def select_sentinel_items(items, max_items, status_box=None, purpose="modelo"):
-    if not max_items or len(items) <= max_items:
-        items.sort(key=sentinel_item_datetime)
-        return items
+    if not items:
+        return []
+    ordered = order_items_dry_season_first(items)
+    if not max_items or len(ordered) <= max_items:
+        dry_count = sum(1 for item in ordered if sentinel_item_is_dry_season(item))
+        update_status(
+            status_box,
+            "Sentinel-2: "
+            f"{len(ordered):,} escenas para {purpose} "
+            f"({dry_count:,} en estacion seca {SENTINEL_DRY_SEASON_MONTHS}).",
+        )
+        return ordered
 
-    selected = sorted(
-        items,
-        key=lambda item: (
-            sentinel_item_cloud_cover(item),
-            sentinel_item_datetime(item),
-        ),
-    )[:max_items]
-    selected.sort(key=sentinel_item_datetime)
+    selected = ordered[:max_items]
+    dry_count = sum(1 for item in selected if sentinel_item_is_dry_season(item))
     update_status(
         status_box,
         "Sentinel-2 devolvio "
         f"{len(items):,} escenas para {purpose}; se usaran las "
-        f"{len(selected):,} de menor nubosidad para mantener la corrida acotada.",
+        f"{len(selected):,} priorizando estacion seca y menor nubosidad "
+        f"({dry_count:,} en meses {SENTINEL_DRY_SEASON_MONTHS}).",
     )
     return selected
 
@@ -823,8 +906,7 @@ def sentinel_item_coverage_count(item, point_geometries):
 
 def select_training_sentinel_items(items, samples, max_items, status_box=None):
     if not max_items or len(items) <= max_items:
-        items.sort(key=sentinel_item_datetime)
-        return items
+        return order_items_dry_season_first(list(items))
 
     point_geometries = samples.geometry
     groups = {}
@@ -841,7 +923,7 @@ def select_training_sentinel_items(items, samples, max_items, status_box=None):
         update_status(
             status_box,
             "No se pudo calcular cobertura espacial de escenas Sentinel-2; "
-            "se usaran escenas de menor nubosidad.",
+            "se usaran escenas priorizando estacion seca y menor nubosidad.",
         )
         return select_sentinel_items(
             items,
@@ -854,6 +936,7 @@ def select_training_sentinel_items(items, samples, max_items, status_box=None):
         group_items.sort(
             key=lambda record: (
                 -record[0],
+                0 if sentinel_item_is_dry_season(record[1]) else 1,
                 sentinel_item_cloud_cover(record[1]),
                 sentinel_item_datetime(record[1]),
             )
@@ -879,12 +962,14 @@ def select_training_sentinel_items(items, samples, max_items, status_box=None):
                 next_keys.append(group_key)
         ordered_group_keys = next_keys
 
-    selected.sort(key=sentinel_item_datetime)
+    selected = order_items_dry_season_first(selected)
+    dry_count = sum(1 for item in selected if sentinel_item_is_dry_season(item))
     update_status(
         status_box,
         "Sentinel-2 devolvio "
         f"{len(items):,} escenas para entrenamiento; se usaran "
-        f"{len(selected):,} escenas que cubren perfiles de entrenamiento en "
+        f"{len(selected):,} escenas que cubren perfiles "
+        f"({dry_count:,} en estacion seca {SENTINEL_DRY_SEASON_MONTHS}) en "
         f"{len(groups):,} tiles. Escenas sin perfiles cubiertos: {ignored_items:,}.",
     )
     return selected
@@ -1049,11 +1134,40 @@ def safe_ratio(numerator, denominator):
         return np.where(np.abs(denominator) > 1e-6, numerator / denominator, np.nan).astype("float32")
 
 
+def read_item_reflectance_bands_grid(item, grid, resampling):
+    return {
+        logical_name: reflectance(
+            read_asset_grid(
+                item_asset_href(item, logical_name),
+                grid["crs"],
+                grid["transform"],
+                grid["width"],
+                grid["height"],
+                resampling,
+            )
+        )
+        for logical_name in SENTINEL_REFLECTANCE_BANDS
+    }
+
+
+def read_item_reflectance_bands_samples(item, samples):
+    return {
+        logical_name: reflectance(
+            read_asset_samples(item_asset_href(item, logical_name), samples)
+        )
+        for logical_name in SENTINEL_REFLECTANCE_BANDS
+    }
+
+
 def derive_sentinel_features(bands):
     blue = bands["blue"]
     green = bands["green"]
     red = bands["red"]
+    rededge1 = bands["rededge1"]
+    rededge2 = bands["rededge2"]
+    rededge3 = bands["rededge3"]
     nir = bands["nir"]
+    nir08 = bands["nir08"]
     swir1 = bands["swir1"]
     swir2 = bands["swir2"]
 
@@ -1065,12 +1179,19 @@ def derive_sentinel_features(bands):
     ndwi = safe_ratio(green - nir, green + nir)
     geoi = safe_ratio(swir1 - swir2, swir1 + swir2)
     bi = np.sqrt(np.maximum(blue**2 + green**2 + red**2, 0)).astype("float32")
+    # Red-edge indices (B8A narrow NIR vs B05/B06) for residual vegetation / soil contrast.
+    ndre = safe_ratio(nir08 - rededge1, nir08 + rededge1)
+    ndre2 = safe_ratio(nir08 - rededge2, nir08 + rededge2)
 
     return {
         "B02": blue,
         "B03": green,
         "B04": red,
+        "B05": rededge1,
+        "B06": rededge2,
+        "B07": rededge3,
         "B08": nir,
+        "B8A": nir08,
         "B11": swir1,
         "B12": swir2,
         "NDVI": ndvi,
@@ -1081,10 +1202,12 @@ def derive_sentinel_features(bands):
         "NDWI": ndwi,
         "GEOI": geoi,
         "BI": bi,
+        "NDRE": ndre,
+        "NDRE2": ndre2,
     }
 
 
-def bare_soil_mask_and_score(features, scl):
+def bare_soil_mask_and_score(features, scl, dry_season=False):
     valid_features = np.ones_like(features["NDVI"], dtype=bool)
     for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES:
         valid_features &= np.isfinite(features[feature_name])
@@ -1093,27 +1216,28 @@ def bare_soil_mask_and_score(features, scl):
     strict_bare = (
         valid_features
         & not_vegetated_scl
-        & (features["NDVI"] >= -0.05)
-        & (features["NDVI"] <= 0.32)
-        & (features["NDWI"] < 0.08)
-        & (features["B04"] > 0.02)
-        & (features["BSI"] > -0.20)
+        & (features["NDVI"] >= SENTINEL_BARE_NDVI_MIN)
+        & (features["NDVI"] <= SENTINEL_BARE_SCL5_NDVI_MAX)
+        & (features["NDWI"] < SENTINEL_BARE_SCL5_NDWI_MAX)
+        & (features["B04"] > SENTINEL_BARE_SCL5_RED_MIN)
+        & (features["BSI"] > SENTINEL_BARE_SCL5_BSI_MIN)
     )
     spectral_bare = (
         valid_features
         & (scl == 7)
-        & (features["NDVI"] >= -0.08)
-        & (features["NDVI"] <= 0.28)
-        & (features["NDWI"] < 0.06)
-        & (features["B04"] > 0.03)
-        & (features["BSI"] > -0.05)
+        & (features["NDVI"] >= SENTINEL_BARE_NDVI_MIN)
+        & (features["NDVI"] <= SENTINEL_BARE_SCL7_NDVI_MAX)
+        & (features["NDWI"] < SENTINEL_BARE_SCL7_NDWI_MAX)
+        & (features["B04"] > SENTINEL_BARE_SCL7_RED_MIN)
+        & (features["BSI"] > SENTINEL_BARE_SCL7_BSI_MIN)
     )
     bare_mask = strict_bare | spectral_bare
     score = (
         features["BSI"]
-        - np.abs(features["NDVI"]) * 0.6
-        - np.maximum(features["NDWI"], 0) * 0.4
+        - np.abs(features["NDVI"]) * 0.75
+        - np.maximum(features["NDWI"], 0) * 0.45
         + features["BI"] * 0.03
+        + (SENTINEL_DRY_SEASON_SCORE_BONUS if dry_season else 0.0)
     ).astype("float32")
     return bare_mask, score
 
@@ -1260,6 +1384,7 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
     best_features, sum_features = empty_spectral_accumulators(shape)
     failed_items = []
     processed_items = 0
+    dry_season_items_used = 0
 
     with rasterio.Env(**SENTINEL_GDAL_OPTIONS):
         for index, item in enumerate(items, start=1):
@@ -1270,71 +1395,11 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
                 status_box,
                 "Componiendo suelo descubierto Sentinel-2 "
                 f"{index:,}/{len(items):,} escenas; pixeles con suelo descubierto "
-                f"{bare_percent:.1f}%; media de observaciones {mean_observations:.1f}.",
+                f"{bare_percent:.1f}%; media de observaciones {mean_observations:.1f} "
+                f"(prioridad estacion seca {SENTINEL_DRY_SEASON_MONTHS}).",
             )
             try:
-                bands = {
-                    "blue": reflectance(
-                        read_asset_grid(
-                            item_asset_href(item, "blue"),
-                            grid["crs"],
-                            grid["transform"],
-                            grid["width"],
-                            grid["height"],
-                            Resampling.bilinear,
-                        )
-                    ),
-                    "green": reflectance(
-                        read_asset_grid(
-                            item_asset_href(item, "green"),
-                            grid["crs"],
-                            grid["transform"],
-                            grid["width"],
-                            grid["height"],
-                            Resampling.bilinear,
-                        )
-                    ),
-                    "red": reflectance(
-                        read_asset_grid(
-                            item_asset_href(item, "red"),
-                            grid["crs"],
-                            grid["transform"],
-                            grid["width"],
-                            grid["height"],
-                            Resampling.bilinear,
-                        )
-                    ),
-                    "nir": reflectance(
-                        read_asset_grid(
-                            item_asset_href(item, "nir"),
-                            grid["crs"],
-                            grid["transform"],
-                            grid["width"],
-                            grid["height"],
-                            Resampling.bilinear,
-                        )
-                    ),
-                    "swir1": reflectance(
-                        read_asset_grid(
-                            item_asset_href(item, "swir1"),
-                            grid["crs"],
-                            grid["transform"],
-                            grid["width"],
-                            grid["height"],
-                            Resampling.bilinear,
-                        )
-                    ),
-                    "swir2": reflectance(
-                        read_asset_grid(
-                            item_asset_href(item, "swir2"),
-                            grid["crs"],
-                            grid["transform"],
-                            grid["width"],
-                            grid["height"],
-                            Resampling.bilinear,
-                        )
-                    ),
-                }
+                bands = read_item_reflectance_bands_grid(item, grid, Resampling.bilinear)
                 scl = np.ma.filled(
                     read_asset_grid(
                         item_asset_href(item, "scl"),
@@ -1357,8 +1422,15 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
                 continue
 
             processed_items += 1
+            dry_season = sentinel_item_is_dry_season(item)
+            if dry_season:
+                dry_season_items_used += 1
             features = derive_sentinel_features(bands)
-            bare_mask, score = bare_soil_mask_and_score(features, scl)
+            bare_mask, score = bare_soil_mask_and_score(
+                features,
+                scl,
+                dry_season=dry_season,
+            )
             bare_mask &= grid["mask"]
             accumulate_bare_spectral_features(
                 best_features,
@@ -1408,6 +1480,32 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
     )
     feature_arrays = attach_dem_features(feature_arrays, dem_features, valid_mask=valid_bare)
 
+    from s1_covariates import s1_feature_arrays_for_grid
+
+    s1_features, s1_meta = s1_feature_arrays_for_grid(
+        poly_geom,
+        grid,
+        status_callback=lambda message: update_status(status_box, message),
+    )
+    feature_arrays = attach_dem_features(feature_arrays, s1_features, valid_mask=valid_bare)
+    s1_ok = (
+        np.isfinite(feature_arrays["VV_DB"])
+        & np.isfinite(feature_arrays["VH_DB"])
+        & np.isfinite(feature_arrays["VV_VH_DB"])
+    )
+    valid_bare = valid_bare & s1_ok
+    if not np.any(valid_bare):
+        raise RuntimeError(
+            "Hay suelo descubierto Sentinel-2, pero no hay cobertura Sentinel-1 RTC "
+            "valida (VV/VH) dentro del poligono. El modelo experimental se detiene."
+        )
+    for feature_name in list(feature_arrays):
+        feature_arrays[feature_name] = np.where(
+            valid_bare,
+            feature_arrays[feature_name],
+            np.nan,
+        ).astype("float32")
+
     summary = {
         "sentinel_collection": SENTINEL_COLLECTION,
         "sentinel_datetime": sentinel_datetime_range(),
@@ -1425,7 +1523,17 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
             mean_bare_observations(bare_count, valid_bare),
             2,
         ),
+        "bare_soil_policy": "strict_scl5_fallback_scl7_dry_season_priority",
+        "dry_season_months": list(SENTINEL_DRY_SEASON_MONTHS),
+        "dry_season_items_used": int(dry_season_items_used),
+        "dry_season_items_fraction": round(
+            dry_season_items_used / max(processed_items, 1),
+            3,
+        ),
+        "bare_soil_ndvi_max_scl5": SENTINEL_BARE_SCL5_NDVI_MAX,
+        "bare_soil_ndvi_max_scl7": SENTINEL_BARE_SCL7_NDVI_MAX,
         **dem_meta,
+        **s1_meta,
     }
     return feature_arrays, valid_bare, bare_count, best_score, grid, summary
 
@@ -1460,6 +1568,7 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
     bare_observation_count = np.zeros(len(samples), dtype="uint16")
     failed_items = []
     processed_items = 0
+    dry_season_items_used = 0
     target_valid_samples = min(
         len(samples),
         max(SENTINEL_MIN_WOSIS_SAMPLES, SENTINEL_TRAINING_TARGET_VALID_SAMPLES),
@@ -1474,17 +1583,11 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
                 "Extrayendo Sentinel-2 para entrenamiento "
                 f"{index:,}/{len(items):,} escenas; perfiles validos "
                 f"{valid_so_far:,}/{len(samples):,}; media de observaciones "
-                f"{mean_observations:.1f}.",
+                f"{mean_observations:.1f} "
+                f"(prioridad estacion seca {SENTINEL_DRY_SEASON_MONTHS}).",
             )
             try:
-                bands = {
-                    "blue": reflectance(read_asset_samples(item_asset_href(item, "blue"), samples)),
-                    "green": reflectance(read_asset_samples(item_asset_href(item, "green"), samples)),
-                    "red": reflectance(read_asset_samples(item_asset_href(item, "red"), samples)),
-                    "nir": reflectance(read_asset_samples(item_asset_href(item, "nir"), samples)),
-                    "swir1": reflectance(read_asset_samples(item_asset_href(item, "swir1"), samples)),
-                    "swir2": reflectance(read_asset_samples(item_asset_href(item, "swir2"), samples)),
-                }
+                bands = read_item_reflectance_bands_samples(item, samples)
                 scl = read_asset_samples(item_asset_href(item, "scl"), samples).astype("int16")
             except Exception as exc:
                 failed_items.append((item.id, str(exc)))
@@ -1497,8 +1600,15 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
                 continue
 
             processed_items += 1
+            dry_season = sentinel_item_is_dry_season(item)
+            if dry_season:
+                dry_season_items_used += 1
             features = derive_sentinel_features(bands)
-            bare_mask, score = bare_soil_mask_and_score(features, scl)
+            bare_mask, score = bare_soil_mask_and_score(
+                features,
+                scl,
+                dry_season=dry_season,
+            )
             accumulate_bare_spectral_features(
                 best_features,
                 sum_features,
@@ -1540,6 +1650,15 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
         status_callback=lambda message: update_status(status_box, message),
     )
     feature_values = attach_dem_features(feature_values, dem_features)
+
+    from s1_covariates import s1_feature_arrays_for_points
+
+    s1_features, s1_meta = s1_feature_arrays_for_points(
+        samples,
+        poly_geom=poly_geom,
+        status_callback=lambda message: update_status(status_box, message),
+    )
+    feature_values = attach_dem_features(feature_values, s1_features)
     feature_frame = pd.DataFrame(feature_values)
     valid = np.isfinite(best_score)
     valid &= feature_frame.replace([np.inf, -np.inf], np.nan).notna().all(axis=1).to_numpy()
@@ -1547,7 +1666,8 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
     if valid_count < SENTINEL_MIN_WOSIS_SAMPLES:
         raise RuntimeError(
             "No hay suficientes perfiles de entrenamiento con observaciones Sentinel-2 "
-            f"de suelo descubierto ({valid_count}; minimo {SENTINEL_MIN_WOSIS_SAMPLES}). "
+            f"de suelo descubierto y Sentinel-1 RTC ({valid_count}; minimo "
+            f"{SENTINEL_MIN_WOSIS_SAMPLES}). "
             f"Se procesaron {processed_items} escenas Sentinel-2 para "
             f"{len(samples)} perfiles completos y fallaron {len(failed_items)} escenas. "
             "El modelo experimental se detiene. Prueba con un poligono en una zona con "
@@ -1575,23 +1695,38 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
         },
         "training_sentinel_items_used": int(processed_items),
         "training_sentinel_items_failed": int(len(failed_items)),
+        "training_dry_season_items_used": int(dry_season_items_used),
+        "training_dry_season_items_fraction": round(
+            dry_season_items_used / max(processed_items, 1),
+            3,
+        ),
+        "training_bare_soil_policy": "strict_scl5_fallback_scl7_dry_season_priority",
+        "training_dry_season_months": list(SENTINEL_DRY_SEASON_MONTHS),
         "mean_bare_observations_per_training_profile": round(
             float(np.mean(bare_observation_count[valid])),
             2,
         ),
         **{f"training_{key}": value for key, value in dem_meta.items()},
+        **{f"training_{key}": value for key, value in s1_meta.items()},
     }
     return x_train, y_train, valid_samples, summary
 
 
 def normalize_texture_fractions(values):
-    values = np.asarray(values, dtype="float32")
-    clipped = np.clip(values, 0, 100)
-    totals = clipped.sum(axis=1)
-    normalized = np.full_like(clipped, np.nan, dtype="float32")
-    valid = totals > 0
-    normalized[valid] = clipped[valid] / totals[valid, None] * 100.0
-    return normalized
+    """Clip to [0, 100] and rescale rows so sand+silt+clay = 100.
+
+    Rows with non-positive totals after clipping become equal thirds (100/3).
+    """
+    values = np.asarray(values, dtype="float64")
+    if values.ndim == 1:
+        values = values.reshape(1, -1)
+    clipped = np.clip(values, 0.0, 100.0)
+    totals = clipped.sum(axis=1, keepdims=True)
+    normalized = np.empty_like(clipped, dtype="float64")
+    valid = totals[:, 0] > 0
+    normalized[valid] = clipped[valid] / totals[valid] * 100.0
+    normalized[~valid] = 100.0 / 3.0
+    return normalized.astype("float32")
 
 
 def neighborhood_mean(values, valid_mask, radius, min_neighbors):
@@ -1673,54 +1808,113 @@ def spatial_cv_groups(samples):
     )
 
 
+class TextureFractionEnsemble:
+    """Three independent RFs (sand/silt/clay) with post-normalization to 100%."""
+
+    TARGET_NAMES = ("sand", "silt", "clay")
+
+    def __init__(self, models):
+        if len(models) != 3:
+            raise ValueError("TextureFractionEnsemble requiere exactamente 3 modelos.")
+        self.models = list(models)
+
+    def predict(self, x):
+        raw = np.column_stack([model.predict(x) for model in self.models])
+        return normalize_texture_fractions(raw)
+
+    def predict_with_tree_uncertainty(self, x):
+        tree_fraction_stacks = []
+        n_trees = min(len(model.estimators_) for model in self.models)
+        for tree_index in range(n_trees):
+            raw = np.column_stack(
+                [model.estimators_[tree_index].predict(x) for model in self.models]
+            )
+            tree_fraction_stacks.append(normalize_texture_fractions(raw))
+        tree_predictions = np.stack(tree_fraction_stacks, axis=0)
+        mean_prediction = normalize_texture_fractions(np.nanmean(tree_predictions, axis=0))
+        uncertainty = np.nanmean(np.nanstd(tree_predictions, axis=0), axis=1)
+        return mean_prediction, uncertainty
+
+    @property
+    def feature_importances_(self):
+        stacked = np.vstack([model.feature_importances_ for model in self.models])
+        return np.mean(stacked, axis=0)
+
+
+def _fit_fraction_models(x_train, y_train, n_estimators, random_state):
+    from sklearn.ensemble import RandomForestRegressor
+
+    models = []
+    for target_index in range(3):
+        model = RandomForestRegressor(
+            n_estimators=n_estimators,
+            min_samples_leaf=3,
+            max_features="sqrt",
+            random_state=random_state + target_index,
+            n_jobs=-1,
+        )
+        model.fit(x_train, y_train[:, target_index])
+        models.append(model)
+    return TextureFractionEnsemble(models)
+
+
 def train_texture_model(x_train, y_train, samples, status_box=None):
     require_experimental_dependencies()
-    from sklearn.ensemble import RandomForestRegressor
     from sklearn.metrics import mean_absolute_error, r2_score
     from sklearn.model_selection import GroupKFold
 
     update_status(
         status_box,
-        "Entrenando Random Forest con perfiles, Sentinel-2 y covariables DEM...",
-    )
-    model = RandomForestRegressor(
-        n_estimators=SENTINEL_RF_TREES,
-        min_samples_leaf=3,
-        max_features="sqrt",
-        random_state=SENTINEL_RF_RANDOM_STATE,
-        n_jobs=-1,
+        "Entrenando 3 Random Forest (arena/limo/arcilla) con Sentinel-2 y DEM...",
     )
     metrics = {
-        "model": "RandomForestRegressor",
+        "model": "RandomForestRegressor_x3_normalized",
         "training_samples": int(len(x_train)),
         "features": SENTINEL_MODEL_FEATURE_NAMES,
         "training_mean_sand": round(float(np.mean(y_train[:, 0])), 2),
         "training_mean_silt": round(float(np.mean(y_train[:, 1])), 2),
         "training_mean_clay": round(float(np.mean(y_train[:, 2])), 2),
+        "fraction_normalization": "sum_to_100",
     }
 
     groups = spatial_cv_groups(samples)
     unique_groups = np.unique(groups)
+    metrics["spatial_cv_group_count"] = int(len(unique_groups))
     if len(unique_groups) >= 3:
         fold_count = min(5, len(unique_groups))
         fold_mae = []
         fold_r2 = []
-        for train_index, test_index in GroupKFold(n_splits=fold_count).split(x_train, y_train, groups):
-            fold_model = RandomForestRegressor(
+        for train_index, test_index in GroupKFold(n_splits=fold_count).split(
+            x_train, y_train, groups
+        ):
+            fold_ensemble = _fit_fraction_models(
+                x_train[train_index],
+                y_train[train_index],
                 n_estimators=120,
-                min_samples_leaf=3,
-                max_features="sqrt",
                 random_state=SENTINEL_RF_RANDOM_STATE,
-                n_jobs=-1,
             )
-            fold_model.fit(x_train[train_index], y_train[train_index])
-            predictions = normalize_texture_fractions(fold_model.predict(x_train[test_index]))
-            fold_mae.append(mean_absolute_error(y_train[test_index], predictions, multioutput="raw_values"))
+            predictions = fold_ensemble.predict(x_train[test_index])
+            fold_mae.append(
+                mean_absolute_error(
+                    y_train[test_index], predictions, multioutput="raw_values"
+                )
+            )
             try:
-                fold_r2.append(r2_score(y_train[test_index], predictions, multioutput="raw_values"))
+                r2_values = np.asarray(
+                    r2_score(
+                        y_train[test_index],
+                        predictions,
+                        multioutput="raw_values",
+                    ),
+                    dtype="float64",
+                ).reshape(-1)
+                if r2_values.size == 3:
+                    fold_r2.append(r2_values)
             except ValueError:
                 pass
-        mean_mae = np.mean(np.vstack(fold_mae), axis=0)
+        mae_stack = np.vstack(fold_mae)
+        mean_mae = np.mean(mae_stack, axis=0)
+        std_mae = np.std(mae_stack, axis=0)
         mean_mae_all = float(np.mean(mean_mae))
         metrics.update(
             {
@@ -1729,12 +1923,16 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
                 "spatial_cv_mae_silt": round(float(mean_mae[1]), 2),
                 "spatial_cv_mae_clay": round(float(mean_mae[2]), 2),
                 "spatial_cv_mae_mean_fraction": round(mean_mae_all, 2),
+                "spatial_cv_mae_std_sand": round(float(std_mae[0]), 2),
+                "spatial_cv_mae_std_silt": round(float(std_mae[1]), 2),
+                "spatial_cv_mae_std_clay": round(float(std_mae[2]), 2),
             }
         )
         if mean_mae_all > 15:
             metrics["model_quality_warning"] = (
                 "La validacion espacial del modelo Sentinel-WoSIS tiene MAE alto; "
-                "use esta capa como apoyo exploratorio y contraste con SoilGrids o muestras locales."
+                "use esta capa como apoyo exploratorio y contraste con SoilGrids "
+                "o muestras locales."
             )
         if fold_r2:
             mean_r2 = np.nanmean(np.vstack(fold_r2), axis=0)
@@ -1745,15 +1943,47 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
                     "spatial_cv_r2_clay": round(float(mean_r2[2]), 3),
                 }
             )
+        metrics["spatial_cv_summary"] = (
+            f"CV espacial {fold_count} folds / {len(unique_groups)} bloques: "
+            f"MAE arena {mean_mae[0]:.1f}, limo {mean_mae[1]:.1f}, "
+            f"arcilla {mean_mae[2]:.1f} (media {mean_mae_all:.1f} pp)."
+        )
     else:
-        metrics["spatial_cv_warning"] = "No se calculo validacion espacial: grupos insuficientes."
+        metrics["spatial_cv_warning"] = (
+            "No se calculo validacion espacial: grupos insuficientes."
+        )
 
-    model.fit(x_train, y_train)
+    ensemble = _fit_fraction_models(
+        x_train,
+        y_train,
+        n_estimators=SENTINEL_RF_TREES,
+        random_state=SENTINEL_RF_RANDOM_STATE,
+    )
     metrics["feature_importance"] = {
         feature_name: round(float(importance), 5)
-        for feature_name, importance in zip(SENTINEL_MODEL_FEATURE_NAMES, model.feature_importances_)
+        for feature_name, importance in zip(
+            SENTINEL_MODEL_FEATURE_NAMES, ensemble.feature_importances_
+        )
     }
-    return model, metrics
+    metrics["feature_importance_by_fraction"] = {
+        target_name: {
+            feature_name: round(float(importance), 5)
+            for feature_name, importance in zip(
+                SENTINEL_MODEL_FEATURE_NAMES, model.feature_importances_
+            )
+        }
+        for target_name, model in zip(TextureFractionEnsemble.TARGET_NAMES, ensemble.models)
+    }
+    top_features = sorted(
+        metrics["feature_importance"].items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )[:8]
+    metrics["top_features"] = [
+        {"feature": name, "importance": importance}
+        for name, importance in top_features
+    ]
+    return ensemble, metrics
 
 
 def predict_texture_fractions(model, feature_arrays, valid_bare, status_box=None):
@@ -1776,12 +2006,17 @@ def predict_texture_fractions(model, feature_arrays, valid_bare, status_box=None
             f"Prediciendo arena/limo/arcilla Sentinel-WoSIS {end:,}/{len(x_predict):,} pixeles...",
         )
         chunk = x_predict[start:end]
-        predictions[start:end] = normalize_texture_fractions(model.predict(chunk))
-        tree_predictions = np.stack(
-            [normalize_texture_fractions(tree.predict(chunk)) for tree in model.estimators_],
-            axis=0,
-        )
-        uncertainty[start:end] = np.nanmean(np.nanstd(tree_predictions, axis=0), axis=1)
+        if hasattr(model, "predict_with_tree_uncertainty"):
+            chunk_pred, chunk_uncertainty = model.predict_with_tree_uncertainty(chunk)
+            predictions[start:end] = chunk_pred
+            uncertainty[start:end] = chunk_uncertainty
+        else:
+            predictions[start:end] = normalize_texture_fractions(model.predict(chunk))
+            tree_predictions = np.stack(
+                [normalize_texture_fractions(tree.predict(chunk)) for tree in model.estimators_],
+                axis=0,
+            )
+            uncertainty[start:end] = np.nanmean(np.nanstd(tree_predictions, axis=0), axis=1)
 
     sand = np.full(shape, np.nan, dtype="float32")
     silt = np.full(shape, np.nan, dtype="float32")

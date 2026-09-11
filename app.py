@@ -147,14 +147,17 @@ SOILGRIDS_SOURCE_DESCRIPTION = (
 )
 SOILGRIDS_CATALOG_URL = "https://docs.isric.org/globaldata/soilgrids/wcs.html"
 SENTINEL_WOSIS_SOURCE_DESCRIPTION = (
-    "Modelo experimental Sentinel-2 L2A + perfiles locales + DEM: entrena Random Forest "
-    "con WoSIS/ISRIC y/o calicatas Costa Rica (arena/limo/arcilla 0-30 cm), covariables "
-    "multitemporales de suelo descubierto Sentinel-2 y relieve (DEM CR en Costa Rica; "
-    "Copernicus GLO-30 fuera de CR) para predecir arena/limo/arcilla a 20 m."
+    "Modelo experimental Sentinel-2 L2A + Sentinel-1 RTC + perfiles locales + DEM: "
+    "entrena 3 Random Forest independientes (arena, limo, arcilla) con WoSIS/ISRIC "
+    "y/o calicatas Costa Rica (0-30 cm), covariables multitemporales de suelo "
+    "descubierto Sentinel-2 (incluye red-edge B05-B07/B8A), backscatter Sentinel-1 "
+    "RTC (VV/VH en dB) y relieve (DEM CR en Costa Rica; Copernicus GLO-30 fuera de CR); "
+    "normaliza fracciones a 100% y predice a 20 m."
 )
 SENTINEL_WOSIS_CATALOG_URL = (
     "https://docs.isric.org/globaldata/wosis/; "
-    "https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a"
+    "https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a; "
+    "https://planetarycomputer.microsoft.com/dataset/sentinel-1-rtc"
 )
 SOILGRIDS_CRS = "ESRI:54052"
 SOILGRIDS_CRS_WKT = (
@@ -201,14 +204,14 @@ DATA_SOURCES = {
         "network_host": "maps.isric.org",
     },
     "sentinel_wosis": {
-        "name": "Experimental Sentinel-2 + perfiles (20 m)",
+        "name": "Experimental Sentinel-2/1 + perfiles (20 m)",
         "description": SENTINEL_WOSIS_SOURCE_DESCRIPTION,
         "catalog": SENTINEL_WOSIS_CATALOG_URL,
         "layers": {
             "training": "WoSIS y/o calicatas Costa Rica sand/silt/clay 0-30 cm",
-            "imagery": "Sentinel-2 L2A multitemporal bare-soil composite",
+            "imagery": "Sentinel-2 L2A bare-soil + Sentinel-1 RTC VV/VH",
             "dem": "DEM CR (Runoff Drive) o Copernicus GLO-30",
-            "model": "RandomForestRegressor experimental",
+            "model": "3x RandomForestRegressor (sand/silt/clay) + normalize 100%",
         },
         "resolution_label": "20 m",
         "resolution_slug": "20m_sentinel_wosis",
@@ -1400,6 +1403,80 @@ def render_recent_processing_jobs():
                     st.code(job.get("traceback") or job["message"])
 
 
+
+def render_sentinel_spatial_cv_panel(uncertainty_summary):
+    """Show spatial block-CV MAE/R2 and top RF features for the experimental model."""
+    if "spatial_cv_mae_mean_fraction" not in uncertainty_summary:
+        return
+
+    st.markdown("**Validacion espacial (bloques)**")
+    folds = uncertainty_summary.get("spatial_cv_folds")
+    groups = uncertainty_summary.get("spatial_cv_group_count")
+    subtitle = []
+    if folds:
+        subtitle.append(f"{folds} folds")
+    if groups:
+        subtitle.append(f"{groups} bloques espaciales")
+    if subtitle:
+        st.caption(" · ".join(subtitle) + ". MAE en puntos porcentuales de fraccion.")
+
+    if uncertainty_summary.get("spatial_cv_summary"):
+        st.write(uncertainty_summary["spatial_cv_summary"])
+
+    col_sand, col_silt, col_clay, col_mean = st.columns(4)
+    col_sand.metric(
+        "MAE arena",
+        f"{uncertainty_summary.get('spatial_cv_mae_sand', '—')}",
+        (
+            f"±{uncertainty_summary['spatial_cv_mae_std_sand']}"
+            if "spatial_cv_mae_std_sand" in uncertainty_summary
+            else None
+        ),
+    )
+    col_silt.metric(
+        "MAE limo",
+        f"{uncertainty_summary.get('spatial_cv_mae_silt', '—')}",
+        (
+            f"±{uncertainty_summary['spatial_cv_mae_std_silt']}"
+            if "spatial_cv_mae_std_silt" in uncertainty_summary
+            else None
+        ),
+    )
+    col_clay.metric(
+        "MAE arcilla",
+        f"{uncertainty_summary.get('spatial_cv_mae_clay', '—')}",
+        (
+            f"±{uncertainty_summary['spatial_cv_mae_std_clay']}"
+            if "spatial_cv_mae_std_clay" in uncertainty_summary
+            else None
+        ),
+    )
+    col_mean.metric(
+        "MAE medio",
+        f"{uncertainty_summary.get('spatial_cv_mae_mean_fraction', '—')}",
+    )
+
+    if any(
+        key in uncertainty_summary
+        for key in ("spatial_cv_r2_sand", "spatial_cv_r2_silt", "spatial_cv_r2_clay")
+    ):
+        r2_sand = uncertainty_summary.get("spatial_cv_r2_sand", "—")
+        r2_silt = uncertainty_summary.get("spatial_cv_r2_silt", "—")
+        r2_clay = uncertainty_summary.get("spatial_cv_r2_clay", "—")
+        st.caption(
+            f"R² CV espacial — arena: {r2_sand} · limo: {r2_silt} · arcilla: {r2_clay}"
+        )
+
+    top_features = uncertainty_summary.get("top_features") or []
+    if top_features:
+        with st.expander("Features mas importantes del RF", expanded=False):
+            lines = [
+                f"- `{item['feature']}`: {item['importance']:.4f}"
+                for item in top_features
+            ]
+            st.markdown("\n".join(lines))
+
+
 def main():
     st.set_page_config(page_title="Soil Point Sampler", layout="wide")
 
@@ -1490,16 +1567,22 @@ def main():
                 st.session_state.training_source = selected_training
                 st.session_state.result = None
             st.warning(
-                "Modo experimental: entrena un modelo local con perfiles WoSIS y/o "
-                "calicatas Costa Rica, Sentinel-2 de suelo descubierto y DEM "
-                "(MDE publico CR via Google Drive en Costa Rica; Copernicus GLO-30 "
-                "fuera de CR). Puede ser lento y no sustituye muestreo de campo."
+                "Modo experimental: entrena 3 Random Forest (arena/limo/arcilla) con "
+                "perfiles WoSIS y/o calicatas Costa Rica, Sentinel-2 de suelo "
+                "descubierto, Sentinel-1 RTC (VV/VH) y DEM (MDE publico CR via "
+                "Google Drive en Costa Rica; Copernicus GLO-30 fuera de CR). "
+                "Normaliza fracciones a 100%. Puede ser lento y no sustituye "
+                "muestreo de campo."
             )
             st.caption(
                 "Recomendacion: usarlo para comparacion exploratoria contra "
                 "OpenLandMap/SoilGrids y revisar la incertidumbre exportada. "
                 "Las features LON/LAT se reemplazaron por elevacion, pendiente, "
-                "aspecto y curvatura."
+                "aspecto y curvatura. Cada fraccion tiene su propio RF; "
+                "covariables incluyen red-edge Sentinel-2 (B05-B07, B8A, NDRE) "
+                "y backscatter Sentinel-1 RTC (VV_DB, VH_DB, VV_VH_DB). "
+                "El compuesto de suelo descubierto prioriza estacion seca "
+                "(dic-abr) y umbrales NDVI/BSI mas estrictos."
             )
         st.info(
             f"La corrida necesita conexion a {source_config['network_host']}. Si la fuente real no "
@@ -1599,10 +1682,26 @@ def main():
                     ):
                         dem_label += " (fallback)"
                     sentinel_details.append(f"relieve={dem_label}")
+                s1_items = bare_summary.get("s1_items_used") or uncertainty_summary.get(
+                    "training_s1_items_used"
+                )
+                if s1_items:
+                    sentinel_details.append(f"Sentinel-1 RTC={int(s1_items)} escenas")
+                dry_items = bare_summary.get("dry_season_items_used")
+                if dry_items is None:
+                    dry_items = uncertainty_summary.get("training_dry_season_items_used")
+                if dry_items is not None:
+                    sentinel_details.append(
+                        f"estacion seca={int(dry_items)} escenas"
+                    )
+                if bare_summary.get("bare_soil_policy") or uncertainty_summary.get(
+                    "training_bare_soil_policy"
+                ):
+                    sentinel_details.append("bare-soil estricto + prioridad estacion seca")
                 if "spatial_cv_mae_mean_fraction" in uncertainty_summary:
                     sentinel_details.append(
                         "MAE CV espacial medio "
-                        f"{uncertainty_summary['spatial_cv_mae_mean_fraction']} puntos porcentuales"
+                        f"{uncertainty_summary['spatial_cv_mae_mean_fraction']} pp"
                     )
                 if uncertainty_summary.get("training_source_label"):
                     sentinel_details.insert(
@@ -1614,8 +1713,11 @@ def main():
                     + "; ".join(sentinel_details)
                     + "."
                 )
+                render_sentinel_spatial_cv_panel(uncertainty_summary)
                 if uncertainty_summary.get("model_quality_warning"):
                     st.warning(uncertainty_summary["model_quality_warning"])
+                if uncertainty_summary.get("spatial_cv_warning"):
+                    st.info(uncertainty_summary["spatial_cv_warning"])
             render_result_map(result)
             render_downloads(result["files"], result)
 
