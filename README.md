@@ -23,7 +23,7 @@ La app no genera datos simulados: si una fuente remota no responde o no existen 
 - Integra una interfaz Streamlit con fuentes globales de textura y salidas GIS listas para revision.
 - Clasifica textura USDA a partir de fracciones normalizadas de arena, limo y arcilla.
 - Compara fuentes globales base: OpenLandMap-soildb 120 m y SoilGrids250m / ISRIC WCS.
-- Incluye un modo experimental Sentinel-2 + perfiles locales que entrena un `RandomForestRegressor` con WoSIS y/o calicatas Costa Rica y covariables multitemporales Sentinel-2 L2A.
+- Incluye un modo experimental Sentinel-2 + perfiles locales que entrena 3 `RandomForestRegressor` (arena/limo/arcilla, normalizados a 100%) con WoSIS y/o calicatas Costa Rica, covariables Sentinel-2 L2A y DEM.
 - Exporta capas auxiliares de consistencia, observaciones Sentinel-2 de suelo descubierto, score de suelo descubierto e incertidumbre del modelo experimental.
 
 ## Metodologia Y Algoritmo
@@ -64,12 +64,13 @@ Fuente alternativa global para comparar resultados. Usa el servicio WCS de ISRIC
 
 ### Experimental Sentinel-2 + perfiles (WoSIS / calicatas CR)
 
-Modo experimental para comparar contra las fuentes globales base. Entrena un modelo local `RandomForestRegressor` con observaciones reales de arena, limo y arcilla 0-30 cm y covariables Sentinel-2 L2A.
+Modo experimental para comparar contra las fuentes globales base. Entrena tres `RandomForestRegressor` independientes (arena, limo y arcilla) con observaciones 0-30 cm y covariables Sentinel-2 L2A + DEM; las predicciones se normalizan para sumar 100% antes de clasificar USDA.
 
 - Entrenamiento: perfiles WoSIS y/o calicatas Costa Rica (`Calicatas_01_02_21_Costa_Rica.csv`) con `sand`, `silt` y `clay`, filtrados a profundidad 0-30 cm.
+- Modelo: un RF por fraccion (no un unico multi-output); post-normalizacion `sum_to_100`.
 - Selector en la app: `Solo WoSIS/ISRIC`, `Solo calicatas Costa Rica` o `WoSIS + calicatas Costa Rica` (predeterminado).
 - Calicatas CR: ~7,434 perfiles usables a nivel nacional; se filtran al buffer de 250 km y se limitan a los ~400 mas cercanos al poligono para acotar Sentinel-2.
-- La columna `Clase Textural` del CSV se conserva como referencia; el Random Forest predice fracciones y la app clasifica USDA despues.
+- La columna `Clase Textural` del CSV se conserva como referencia; los RF predicen fracciones y la app clasifica USDA despues.
 - Descarga WoSIS: consulta el WFS por teselas con reintentos para reducir respuestas grandes o mal formadas.
 - Area de entrenamiento: busca puntos conocidos dentro de un buffer de 250 km alrededor del poligono ingresado.
 - Area Sentinel-2 de entrenamiento: usa el extent total de los perfiles encontrados para extraer covariables Sentinel-2 en esos puntos conocidos.

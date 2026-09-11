@@ -1585,13 +1585,20 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
 
 
 def normalize_texture_fractions(values):
-    values = np.asarray(values, dtype="float32")
-    clipped = np.clip(values, 0, 100)
-    totals = clipped.sum(axis=1)
-    normalized = np.full_like(clipped, np.nan, dtype="float32")
-    valid = totals > 0
-    normalized[valid] = clipped[valid] / totals[valid, None] * 100.0
-    return normalized
+    """Clip to [0, 100] and rescale rows so sand+silt+clay = 100.
+
+    Rows with non-positive totals after clipping become equal thirds (100/3).
+    """
+    values = np.asarray(values, dtype="float64")
+    if values.ndim == 1:
+        values = values.reshape(1, -1)
+    clipped = np.clip(values, 0.0, 100.0)
+    totals = clipped.sum(axis=1, keepdims=True)
+    normalized = np.empty_like(clipped, dtype="float64")
+    valid = totals[:, 0] > 0
+    normalized[valid] = clipped[valid] / totals[valid] * 100.0
+    normalized[~valid] = 100.0 / 3.0
+    return normalized.astype("float32")
 
 
 def neighborhood_mean(values, valid_mask, radius, min_neighbors):
@@ -1673,30 +1680,73 @@ def spatial_cv_groups(samples):
     )
 
 
+class TextureFractionEnsemble:
+    """Three independent RFs (sand/silt/clay) with post-normalization to 100%."""
+
+    TARGET_NAMES = ("sand", "silt", "clay")
+
+    def __init__(self, models):
+        if len(models) != 3:
+            raise ValueError("TextureFractionEnsemble requiere exactamente 3 modelos.")
+        self.models = list(models)
+
+    def predict(self, x):
+        raw = np.column_stack([model.predict(x) for model in self.models])
+        return normalize_texture_fractions(raw)
+
+    def predict_with_tree_uncertainty(self, x):
+        tree_fraction_stacks = []
+        n_trees = min(len(model.estimators_) for model in self.models)
+        for tree_index in range(n_trees):
+            raw = np.column_stack(
+                [model.estimators_[tree_index].predict(x) for model in self.models]
+            )
+            tree_fraction_stacks.append(normalize_texture_fractions(raw))
+        tree_predictions = np.stack(tree_fraction_stacks, axis=0)
+        mean_prediction = normalize_texture_fractions(np.nanmean(tree_predictions, axis=0))
+        uncertainty = np.nanmean(np.nanstd(tree_predictions, axis=0), axis=1)
+        return mean_prediction, uncertainty
+
+    @property
+    def feature_importances_(self):
+        stacked = np.vstack([model.feature_importances_ for model in self.models])
+        return np.mean(stacked, axis=0)
+
+
+def _fit_fraction_models(x_train, y_train, n_estimators, random_state):
+    from sklearn.ensemble import RandomForestRegressor
+
+    models = []
+    for target_index in range(3):
+        model = RandomForestRegressor(
+            n_estimators=n_estimators,
+            min_samples_leaf=3,
+            max_features="sqrt",
+            random_state=random_state + target_index,
+            n_jobs=-1,
+        )
+        model.fit(x_train, y_train[:, target_index])
+        models.append(model)
+    return TextureFractionEnsemble(models)
+
+
 def train_texture_model(x_train, y_train, samples, status_box=None):
     require_experimental_dependencies()
-    from sklearn.ensemble import RandomForestRegressor
     from sklearn.metrics import mean_absolute_error, r2_score
     from sklearn.model_selection import GroupKFold
 
     update_status(
         status_box,
-        "Entrenando Random Forest con perfiles, Sentinel-2 y covariables DEM...",
-    )
-    model = RandomForestRegressor(
-        n_estimators=SENTINEL_RF_TREES,
-        min_samples_leaf=3,
-        max_features="sqrt",
-        random_state=SENTINEL_RF_RANDOM_STATE,
-        n_jobs=-1,
+        "Entrenando 3 Random Forest (arena/limo/arcilla) con Sentinel-2 y DEM...",
     )
     metrics = {
-        "model": "RandomForestRegressor",
+        "model": "RandomForestRegressor_x3_normalized",
         "training_samples": int(len(x_train)),
         "features": SENTINEL_MODEL_FEATURE_NAMES,
         "training_mean_sand": round(float(np.mean(y_train[:, 0])), 2),
         "training_mean_silt": round(float(np.mean(y_train[:, 1])), 2),
         "training_mean_clay": round(float(np.mean(y_train[:, 2])), 2),
+        "fraction_normalization": "sum_to_100",
     }
 
     groups = spatial_cv_groups(samples)
@@ -1706,18 +1756,20 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
         fold_mae = []
         fold_r2 = []
         for train_index, test_index in GroupKFold(n_splits=fold_count).split(x_train, y_train, groups):
-            fold_model = RandomForestRegressor(
+            fold_ensemble = _fit_fraction_models(
+                x_train[train_index],
+                y_train[train_index],
                 n_estimators=120,
-                min_samples_leaf=3,
-                max_features="sqrt",
                 random_state=SENTINEL_RF_RANDOM_STATE,
-                n_jobs=-1,
             )
-            fold_model.fit(x_train[train_index], y_train[train_index])
-            predictions = normalize_texture_fractions(fold_model.predict(x_train[test_index]))
-            fold_mae.append(mean_absolute_error(y_train[test_index], predictions, multioutput="raw_values"))
+            predictions = fold_ensemble.predict(x_train[test_index])
+            fold_mae.append(
+                mean_absolute_error(y_train[test_index], predictions, multioutput="raw_values")
+            )
             try:
-                fold_r2.append(r2_score(y_train[test_index], predictions, multioutput="raw_values"))
+                fold_r2.append(
+                    r2_score(y_train[test_index], predictions, multioutput="raw_values")
+                )
             except ValueError:
                 pass
         mean_mae = np.mean(np.vstack(fold_mae), axis=0)
@@ -1748,12 +1800,28 @@ def train_texture_model(x_train, y_train, samples, status_box=None):
     else:
         metrics["spatial_cv_warning"] = "No se calculo validacion espacial: grupos insuficientes."
 
-    model.fit(x_train, y_train)
+    ensemble = _fit_fraction_models(
+        x_train,
+        y_train,
+        n_estimators=SENTINEL_RF_TREES,
+        random_state=SENTINEL_RF_RANDOM_STATE,
+    )
     metrics["feature_importance"] = {
         feature_name: round(float(importance), 5)
-        for feature_name, importance in zip(SENTINEL_MODEL_FEATURE_NAMES, model.feature_importances_)
+        for feature_name, importance in zip(
+            SENTINEL_MODEL_FEATURE_NAMES, ensemble.feature_importances_
+        )
     }
-    return model, metrics
+    metrics["feature_importance_by_fraction"] = {
+        target_name: {
+            feature_name: round(float(importance), 5)
+            for feature_name, importance in zip(
+                SENTINEL_MODEL_FEATURE_NAMES, model.feature_importances_
+            )
+        }
+        for target_name, model in zip(TextureFractionEnsemble.TARGET_NAMES, ensemble.models)
+    }
+    return ensemble, metrics
 
 
 def predict_texture_fractions(model, feature_arrays, valid_bare, status_box=None):
@@ -1776,12 +1844,17 @@ def predict_texture_fractions(model, feature_arrays, valid_bare, status_box=None
             f"Prediciendo arena/limo/arcilla Sentinel-WoSIS {end:,}/{len(x_predict):,} pixeles...",
         )
         chunk = x_predict[start:end]
-        predictions[start:end] = normalize_texture_fractions(model.predict(chunk))
-        tree_predictions = np.stack(
-            [normalize_texture_fractions(tree.predict(chunk)) for tree in model.estimators_],
-            axis=0,
-        )
-        uncertainty[start:end] = np.nanmean(np.nanstd(tree_predictions, axis=0), axis=1)
+        if hasattr(model, "predict_with_tree_uncertainty"):
+            chunk_pred, chunk_uncertainty = model.predict_with_tree_uncertainty(chunk)
+            predictions[start:end] = chunk_pred
+            uncertainty[start:end] = chunk_uncertainty
+        else:
+            predictions[start:end] = normalize_texture_fractions(model.predict(chunk))
+            tree_predictions = np.stack(
+                [normalize_texture_fractions(tree.predict(chunk)) for tree in model.estimators_],
+                axis=0,
+            )
+            uncertainty[start:end] = np.nanmean(np.nanstd(tree_predictions, axis=0), axis=1)
 
     sand = np.full(shape, np.nan, dtype="float32")
     silt = np.full(shape, np.nan, dtype="float32")

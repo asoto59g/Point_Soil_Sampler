@@ -147,10 +147,11 @@ SOILGRIDS_SOURCE_DESCRIPTION = (
 )
 SOILGRIDS_CATALOG_URL = "https://docs.isric.org/globaldata/soilgrids/wcs.html"
 SENTINEL_WOSIS_SOURCE_DESCRIPTION = (
-    "Modelo experimental Sentinel-2 L2A + perfiles locales + DEM: entrena Random Forest "
-    "con WoSIS/ISRIC y/o calicatas Costa Rica (arena/limo/arcilla 0-30 cm), covariables "
-    "multitemporales de suelo descubierto Sentinel-2 y relieve (DEM CR en Costa Rica; "
-    "Copernicus GLO-30 fuera de CR) para predecir arena/limo/arcilla a 20 m."
+    "Modelo experimental Sentinel-2 L2A + perfiles locales + DEM: entrena 3 Random Forest "
+    "independientes (arena, limo, arcilla) con WoSIS/ISRIC y/o calicatas Costa Rica "
+    "(0-30 cm), covariables multitemporales de suelo descubierto Sentinel-2 y relieve "
+    "(DEM CR en Costa Rica; Copernicus GLO-30 fuera de CR); normaliza fracciones a 100% "
+    "y predice a 20 m."
 )
 SENTINEL_WOSIS_CATALOG_URL = (
     "https://docs.isric.org/globaldata/wosis/; "
@@ -208,7 +209,7 @@ DATA_SOURCES = {
             "training": "WoSIS y/o calicatas Costa Rica sand/silt/clay 0-30 cm",
             "imagery": "Sentinel-2 L2A multitemporal bare-soil composite",
             "dem": "DEM CR (Runoff Drive) o Copernicus GLO-30",
-            "model": "RandomForestRegressor experimental",
+            "model": "3x RandomForestRegressor (sand/silt/clay) + normalize 100%",
         },
         "resolution_label": "20 m",
         "resolution_slug": "20m_sentinel_wosis",
@@ -1490,16 +1491,17 @@ def main():
                 st.session_state.training_source = selected_training
                 st.session_state.result = None
             st.warning(
-                "Modo experimental: entrena un modelo local con perfiles WoSIS y/o "
-                "calicatas Costa Rica, Sentinel-2 de suelo descubierto y DEM "
-                "(MDE publico CR via Google Drive en Costa Rica; Copernicus GLO-30 "
-                "fuera de CR). Puede ser lento y no sustituye muestreo de campo."
+                "Modo experimental: entrena 3 Random Forest (arena/limo/arcilla) con "
+                "perfiles WoSIS y/o calicatas Costa Rica, Sentinel-2 de suelo "
+                "descubierto y DEM (MDE publico CR via Google Drive en Costa Rica; "
+                "Copernicus GLO-30 fuera de CR). Normaliza fracciones a 100%. "
+                "Puede ser lento y no sustituye muestreo de campo."
             )
             st.caption(
                 "Recomendacion: usarlo para comparacion exploratoria contra "
                 "OpenLandMap/SoilGrids y revisar la incertidumbre exportada. "
                 "Las features LON/LAT se reemplazaron por elevacion, pendiente, "
-                "aspecto y curvatura."
+                "aspecto y curvatura. Cada fraccion tiene su propio RF."
             )
         st.info(
             f"La corrida necesita conexion a {source_config['network_host']}. Si la fuente real no "
