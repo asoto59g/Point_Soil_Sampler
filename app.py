@@ -22,6 +22,15 @@ from rasterio.io import MemoryFile
 from rasterio.mask import mask as raster_mask
 from rasterio.windows import from_bounds
 from shapely.geometry import mapping, shape
+
+from climate_dry_season import (
+    DEFAULT_DRY_SEASON_MONTHS,
+    DEFAULT_N_DRIEST_MONTHS,
+    MONTH_NAMES_ES,
+    format_month_list,
+    normalize_months,
+    resolve_dry_season_months,
+)
 import streamlit as st
 from streamlit_folium import st_folium
 
@@ -273,7 +282,16 @@ class BackgroundStatus:
         update_processing_job_in_registry(self.registry, self.job_id, message=message)
 
 
-def run_processing_job(registry, job_id, geometry, source_key, training_source=None):
+def run_processing_job(
+    registry,
+    job_id,
+    geometry,
+    source_key,
+    training_source=None,
+    dry_season_mode="auto",
+    dry_season_months=None,
+    dry_season_n_driest=DEFAULT_N_DRIEST_MONTHS,
+):
     status = BackgroundStatus(registry, job_id)
     try:
         result = process_sampling(
@@ -281,6 +299,9 @@ def run_processing_job(registry, job_id, geometry, source_key, training_source=N
             source_key=source_key,
             status_box=status,
             training_source=training_source,
+            dry_season_mode=dry_season_mode,
+            dry_season_months=dry_season_months,
+            dry_season_n_driest=dry_season_n_driest,
         )
     except Exception as exc:
         update_processing_job_in_registry(
@@ -304,17 +325,31 @@ def run_processing_job(registry, job_id, geometry, source_key, training_source=N
     )
 
 
-def start_processing_job(geometry, source_key, training_source=None):
+def start_processing_job(
+    geometry,
+    source_key,
+    training_source=None,
+    dry_season_mode="auto",
+    dry_season_months=None,
+    dry_season_n_driest=DEFAULT_N_DRIEST_MONTHS,
+):
     source_config = get_source_config(source_key)
     job_id = uuid.uuid4().hex[:12]
     job_geometry = json.loads(json.dumps(geometry))
     resolved_training_source = None
+    resolved_dry_season_mode = "auto"
+    resolved_dry_season_months = None
+    resolved_dry_season_n_driest = DEFAULT_N_DRIEST_MONTHS
     if source_config.get("experimental"):
         resolved_training_source = training_source or DEFAULT_TRAINING_SOURCE
         if resolved_training_source not in TRAINING_SOURCE_OPTIONS:
             raise ValueError(
                 f"Fuente de entrenamiento no soportada: {resolved_training_source}"
             )
+        resolved_dry_season_mode = dry_season_mode or "auto"
+        if resolved_dry_season_mode == "manual":
+            resolved_dry_season_months = list(normalize_months(dry_season_months or ()))
+        resolved_dry_season_n_driest = int(dry_season_n_driest or DEFAULT_N_DRIEST_MONTHS)
     job = {
         "id": job_id,
         "source_key": source_key,
@@ -324,6 +359,11 @@ def start_processing_job(geometry, source_key, training_source=None):
             TRAINING_SOURCE_OPTIONS.get(resolved_training_source)
             if resolved_training_source
             else None
+        ),
+        "dry_season_mode": resolved_dry_season_mode if source_config.get("experimental") else None,
+        "dry_season_months": resolved_dry_season_months,
+        "dry_season_n_driest": (
+            resolved_dry_season_n_driest if source_config.get("experimental") else None
         ),
         "state": "running",
         "message": "Iniciando procesamiento...",
@@ -337,7 +377,16 @@ def start_processing_job(geometry, source_key, training_source=None):
     registry = processing_registry()
     thread = threading.Thread(
         target=run_processing_job,
-        args=(registry, job_id, job_geometry, source_key, resolved_training_source),
+        args=(
+            registry,
+            job_id,
+            job_geometry,
+            source_key,
+            resolved_training_source,
+            resolved_dry_season_mode,
+            resolved_dry_season_months,
+            resolved_dry_season_n_driest,
+        ),
         name=f"soil-sampler-job-{job_id}",
         daemon=True,
     )
@@ -743,6 +792,9 @@ def read_soil_fraction_rasters(
     source_key,
     status_box=None,
     training_source=None,
+    dry_season_mode="auto",
+    dry_season_months=None,
+    dry_season_n_driest=DEFAULT_N_DRIEST_MONTHS,
 ):
     if source_key == "openlandmap":
         return read_openlandmap_fraction_rasters(poly_geom, status_box)
@@ -755,6 +807,9 @@ def read_soil_fraction_rasters(
             status_box=status_box,
             max_pixels=MAX_PIXELS,
             training_source=training_source or DEFAULT_TRAINING_SOURCE,
+            dry_season_mode=dry_season_mode,
+            dry_season_months=dry_season_months,
+            dry_season_n_driest=dry_season_n_driest,
         )
     raise ValueError(f"Fuente de datos no soportada: {source_key}")
 
@@ -1075,6 +1130,9 @@ def process_sampling(
     source_key=DEFAULT_SOURCE_KEY,
     status_box=None,
     training_source=None,
+    dry_season_mode="auto",
+    dry_season_months=None,
+    dry_season_n_driest=DEFAULT_N_DRIEST_MONTHS,
 ):
     source_config = get_source_config(source_key)
     poly_geom = validate_polygon(geometry)
@@ -1083,6 +1141,9 @@ def process_sampling(
         source_key,
         status_box,
         training_source=training_source,
+        dry_season_mode=dry_season_mode,
+        dry_season_months=dry_season_months,
+        dry_season_n_driest=dry_season_n_driest,
     )
 
     if status_box:
@@ -1488,6 +1549,12 @@ def main():
         st.session_state.source_key = DEFAULT_SOURCE_KEY
     if "training_source" not in st.session_state:
         st.session_state.training_source = DEFAULT_TRAINING_SOURCE
+    if "dry_season_mode" not in st.session_state:
+        st.session_state.dry_season_mode = "auto"
+    if "dry_season_months" not in st.session_state:
+        st.session_state.dry_season_months = list(DEFAULT_DRY_SEASON_MONTHS)
+    if "dry_season_n_driest" not in st.session_state:
+        st.session_state.dry_season_n_driest = DEFAULT_N_DRIEST_MONTHS
     if "processing_job_id" not in st.session_state:
         st.session_state.processing_job_id = None
 
@@ -1566,6 +1633,77 @@ def main():
             if selected_training != st.session_state.training_source:
                 st.session_state.training_source = selected_training
                 st.session_state.result = None
+            dry_mode_options = {
+                "auto": "Automatico (WorldClim / CHIRPS)",
+                "manual": "Manual (selector de meses)",
+                "default_ca": "Fijo Centroamerica (dic-abr)",
+            }
+            selected_dry_mode = st.selectbox(
+                "Estacion seca para Sentinel",
+                list(dry_mode_options.keys()),
+                index=list(dry_mode_options.keys()).index(st.session_state.dry_season_mode)
+                if st.session_state.dry_season_mode in dry_mode_options
+                else 0,
+                format_func=lambda key: dry_mode_options[key],
+                help=(
+                    "Automatico calcula los meses mas secos en el centroide del AOI "
+                    "con WorldClim 2.1 (fallback CHIRPS). Manual permite forzar meses."
+                ),
+            )
+            if selected_dry_mode != st.session_state.dry_season_mode:
+                st.session_state.dry_season_mode = selected_dry_mode
+                st.session_state.result = None
+
+            if selected_dry_mode == "auto":
+                st.session_state.dry_season_n_driest = st.slider(
+                    "Cantidad de meses mas secos",
+                    min_value=3,
+                    max_value=6,
+                    value=int(st.session_state.dry_season_n_driest or DEFAULT_N_DRIEST_MONTHS),
+                    help="Se usan los N meses con menor precipitacion climatologica.",
+                )
+                if st.session_state.polygon_geojson:
+                    try:
+                        preview_geom = validate_polygon(st.session_state.polygon_geojson)
+                        preview = resolve_dry_season_months(
+                            poly_geom=preview_geom,
+                            mode="auto",
+                            n_driest=int(st.session_state.dry_season_n_driest),
+                        )
+                        st.caption(
+                            f"Vista previa: {format_month_list(preview.months)} "
+                            f"via {preview.source_label}."
+                        )
+                    except Exception as exc:
+                        st.caption(f"No se pudo estimar estacion seca aun: {exc}")
+                else:
+                    st.caption("Dibuja o sube un poligono para previsualizar meses secos.")
+            elif selected_dry_mode == "manual":
+                month_options = list(range(1, 13))
+                selected_months = st.multiselect(
+                    "Meses secos (manual)",
+                    month_options,
+                    default=[
+                        month
+                        for month in st.session_state.dry_season_months
+                        if month in month_options
+                    ]
+                    or list(DEFAULT_DRY_SEASON_MONTHS),
+                    format_func=lambda month: f"{month:02d} - {MONTH_NAMES_ES[month]}",
+                )
+                if selected_months:
+                    normalized = list(normalize_months(selected_months))
+                    if normalized != list(st.session_state.dry_season_months):
+                        st.session_state.dry_season_months = normalized
+                        st.session_state.result = None
+                else:
+                    st.warning("Selecciona al menos un mes seco.")
+            else:
+                st.caption(
+                    "Se usara el calendario fijo de Centroamerica pacifica: "
+                    f"{format_month_list(DEFAULT_DRY_SEASON_MONTHS)}."
+                )
+
             st.warning(
                 "Modo experimental: entrena 3 Random Forest (arena/limo/arcilla) con "
                 "perfiles WoSIS y/o calicatas Costa Rica, Sentinel-2 de suelo "
@@ -1602,10 +1740,35 @@ def main():
                         if source_config.get("experimental")
                         else None
                     )
+                    dry_season_mode = (
+                        st.session_state.dry_season_mode
+                        if source_config.get("experimental")
+                        else "auto"
+                    )
+                    dry_season_months = (
+                        st.session_state.dry_season_months
+                        if source_config.get("experimental")
+                        and dry_season_mode == "manual"
+                        else None
+                    )
+                    dry_season_n_driest = (
+                        st.session_state.dry_season_n_driest
+                        if source_config.get("experimental")
+                        else DEFAULT_N_DRIEST_MONTHS
+                    )
+                    if (
+                        source_config.get("experimental")
+                        and dry_season_mode == "manual"
+                        and not dry_season_months
+                    ):
+                        raise ValueError("Selecciona al menos un mes seco manual.")
                     st.session_state.processing_job_id = start_processing_job(
                         st.session_state.polygon_geojson,
                         st.session_state.source_key,
                         training_source=training_source,
+                        dry_season_mode=dry_season_mode,
+                        dry_season_months=dry_season_months,
+                        dry_season_n_driest=dry_season_n_driest,
                     )
                     st.session_state.result = None
                     rerun_app()
@@ -1702,6 +1865,21 @@ def main():
                     sentinel_details.append(
                         "MAE CV espacial medio "
                         f"{uncertainty_summary['spatial_cv_mae_mean_fraction']} pp"
+                    )
+                dry_season_label = (
+                    bare_summary.get("dry_season_source_label")
+                    or uncertainty_summary.get("dry_season_source_label")
+                )
+                dry_months = (
+                    bare_summary.get("dry_season_months")
+                    or uncertainty_summary.get("dry_season_months")
+                    or uncertainty_summary.get("training_dry_season_months")
+                )
+                if dry_months:
+                    sentinel_details.append(
+                        "estacion seca="
+                        + format_month_list(dry_months)
+                        + (f" ({dry_season_label})" if dry_season_label else "")
                     )
                 if uncertainty_summary.get("training_source_label"):
                     sentinel_details.insert(

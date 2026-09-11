@@ -1,3 +1,4 @@
+from contextvars import ContextVar
 from datetime import datetime, timezone
 import json
 import os
@@ -20,6 +21,14 @@ import pandas as pd
 import rasterio
 from shapely.geometry import Point, box, mapping, shape
 
+from climate_dry_season import (
+    DEFAULT_DRY_SEASON_MONTHS,
+    DEFAULT_N_DRIEST_MONTHS,
+    format_month_list,
+    normalize_months,
+    resolve_dry_season_months,
+)
+
 
 SENTINEL_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 SENTINEL_COLLECTION = "sentinel-2-l2a"
@@ -39,9 +48,30 @@ SENTINEL_TARGET_MEAN_BARE_OBSERVATIONS = float(os.getenv("SENTINEL_TARGET_MEAN_B
 SENTINEL_TRAINING_TARGET_MEAN_BARE_OBSERVATIONS = float(
     os.getenv("SENTINEL_TRAINING_TARGET_MEAN_BARE_OBSERVATIONS", "2.0")
 )
-# Costa Rica / Pacific Central America dry season (prefer bare-soil scenes).
-SENTINEL_DRY_SEASON_MONTHS = (12, 1, 2, 3, 4)
+# Default dry season = Pacific Central America; overridden per-run via context.
+SENTINEL_DRY_SEASON_MONTHS = DEFAULT_DRY_SEASON_MONTHS
 SENTINEL_DRY_SEASON_SCORE_BONUS = 0.12
+_ACTIVE_DRY_SEASON_MONTHS: ContextVar[tuple[int, ...]] = ContextVar(
+    "active_dry_season_months",
+    default=SENTINEL_DRY_SEASON_MONTHS,
+)
+_ACTIVE_DRY_SEASON_META: ContextVar[dict | None] = ContextVar(
+    "active_dry_season_meta",
+    default=None,
+)
+
+
+def get_active_dry_season_months():
+    return _ACTIVE_DRY_SEASON_MONTHS.get()
+
+
+def get_active_dry_season_meta():
+    return _ACTIVE_DRY_SEASON_META.get()
+
+
+def dry_season_months_label(months=None):
+    months = tuple(months) if months is not None else get_active_dry_season_months()
+    return format_month_list(months)
 # Stricter bare-soil spectral gates (SCL 5 primary, SCL 7 fallback).
 SENTINEL_BARE_SCL5_NDVI_MAX = 0.25
 SENTINEL_BARE_SCL5_NDWI_MAX = 0.05
@@ -843,17 +873,27 @@ def sentinel_item_month(item):
         return None
 
 
-def sentinel_item_is_dry_season(item):
+def sentinel_item_is_dry_season(item, dry_season_months=None):
     month = sentinel_item_month(item)
-    return month in SENTINEL_DRY_SEASON_MONTHS if month is not None else False
+    months = (
+        tuple(dry_season_months)
+        if dry_season_months is not None
+        else get_active_dry_season_months()
+    )
+    return month in months if month is not None else False
 
 
-def order_items_dry_season_first(items):
+def order_items_dry_season_first(items, dry_season_months=None):
     """Prefer dry-season scenes, then lower cloud cover, then newer datetime."""
+    months = (
+        tuple(dry_season_months)
+        if dry_season_months is not None
+        else get_active_dry_season_months()
+    )
     return sorted(
         items,
         key=lambda item: (
-            0 if sentinel_item_is_dry_season(item) else 1,
+            0 if sentinel_item_is_dry_season(item, dry_season_months=months) else 1,
             sentinel_item_cloud_cover(item),
             # Newer scenes first within the same season/cloud bucket.
             "" if not sentinel_item_datetime(item) else sentinel_item_datetime(item),
@@ -880,7 +920,7 @@ def select_sentinel_items(items, max_items, status_box=None, purpose="modelo"):
             status_box,
             "Sentinel-2: "
             f"{len(ordered):,} escenas para {purpose} "
-            f"({dry_count:,} en estacion seca {SENTINEL_DRY_SEASON_MONTHS}).",
+            f"({dry_count:,} en estacion seca {dry_season_months_label()}).",
         )
         return ordered
 
@@ -891,7 +931,7 @@ def select_sentinel_items(items, max_items, status_box=None, purpose="modelo"):
         "Sentinel-2 devolvio "
         f"{len(items):,} escenas para {purpose}; se usaran las "
         f"{len(selected):,} priorizando estacion seca y menor nubosidad "
-        f"({dry_count:,} en meses {SENTINEL_DRY_SEASON_MONTHS}).",
+        f"({dry_count:,} en meses {dry_season_months_label()}).",
     )
     return selected
 
@@ -969,7 +1009,7 @@ def select_training_sentinel_items(items, samples, max_items, status_box=None):
         "Sentinel-2 devolvio "
         f"{len(items):,} escenas para entrenamiento; se usaran "
         f"{len(selected):,} escenas que cubren perfiles "
-        f"({dry_count:,} en estacion seca {SENTINEL_DRY_SEASON_MONTHS}) en "
+        f"({dry_count:,} en estacion seca {dry_season_months_label()}) en "
         f"{len(groups):,} tiles. Escenas sin perfiles cubiertos: {ignored_items:,}.",
     )
     return selected
@@ -1407,7 +1447,7 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
                 "Componiendo suelo descubierto Sentinel-2 "
                 f"{index:,}/{len(items):,} escenas; pixeles con suelo descubierto "
                 f"{bare_percent:.1f}%; media de observaciones {mean_observations:.1f} "
-                f"(prioridad estacion seca {SENTINEL_DRY_SEASON_MONTHS}).",
+                f"(prioridad estacion seca {dry_season_months_label()}).",
             )
             try:
                 bands = read_item_reflectance_bands_grid(item, grid, Resampling.bilinear)
@@ -1535,7 +1575,7 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
             2,
         ),
         "bare_soil_policy": "strict_scl5_fallback_scl7_dry_season_priority",
-        "dry_season_months": list(SENTINEL_DRY_SEASON_MONTHS),
+        "dry_season_months": list(get_active_dry_season_months()),
         "dry_season_items_used": int(dry_season_items_used),
         "dry_season_items_fraction": round(
             dry_season_items_used / max(processed_items, 1),
@@ -1595,7 +1635,7 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
                 f"{index:,}/{len(items):,} escenas; perfiles validos "
                 f"{valid_so_far:,}/{len(samples):,}; media de observaciones "
                 f"{mean_observations:.1f} "
-                f"(prioridad estacion seca {SENTINEL_DRY_SEASON_MONTHS}).",
+                f"(prioridad estacion seca {dry_season_months_label()}).",
             )
             try:
                 bands = read_item_reflectance_bands_samples(item, samples)
@@ -1712,7 +1752,7 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
             3,
         ),
         "training_bare_soil_policy": "strict_scl5_fallback_scl7_dry_season_priority",
-        "training_dry_season_months": list(SENTINEL_DRY_SEASON_MONTHS),
+        "training_dry_season_months": list(get_active_dry_season_months()),
         "mean_bare_observations_per_training_profile": round(
             float(np.mean(bare_observation_count[valid])),
             2,
@@ -2049,8 +2089,48 @@ def read_sentinel_wosis_fraction_rasters(
     status_box=None,
     max_pixels=2_500_000,
     training_source=DEFAULT_TRAINING_SOURCE,
+    dry_season_mode="auto",
+    dry_season_months=None,
+    dry_season_n_driest=DEFAULT_N_DRIEST_MONTHS,
 ):
     require_experimental_dependencies()
+
+    dry_season_resolution = resolve_dry_season_months(
+        poly_geom=poly_geom,
+        mode=dry_season_mode,
+        manual_months=dry_season_months,
+        n_driest=int(dry_season_n_driest or DEFAULT_N_DRIEST_MONTHS),
+    )
+    dry_season_meta = dry_season_resolution.as_dict()
+    months_token = _ACTIVE_DRY_SEASON_MONTHS.set(tuple(dry_season_resolution.months))
+    meta_token = _ACTIVE_DRY_SEASON_META.set(dry_season_meta)
+    update_status(
+        status_box,
+        "Estacion seca "
+        f"({dry_season_resolution.source_label}): "
+        f"{dry_season_months_label(dry_season_resolution.months)}.",
+    )
+
+    try:
+        return _read_sentinel_wosis_fraction_rasters_with_dry_season(
+            poly_geom=poly_geom,
+            status_box=status_box,
+            max_pixels=max_pixels,
+            training_source=training_source,
+            dry_season_meta=dry_season_meta,
+        )
+    finally:
+        _ACTIVE_DRY_SEASON_MONTHS.reset(months_token)
+        _ACTIVE_DRY_SEASON_META.reset(meta_token)
+
+
+def _read_sentinel_wosis_fraction_rasters_with_dry_season(
+    poly_geom,
+    status_box=None,
+    max_pixels=2_500_000,
+    training_source=DEFAULT_TRAINING_SOURCE,
+    dry_season_meta=None,
+):
     samples = fetch_training_texture_samples(
         poly_geom,
         training_source=training_source,
@@ -2081,6 +2161,7 @@ def read_sentinel_wosis_fraction_rasters(
     source_counts = (
         samples["source"].value_counts().to_dict() if "source" in samples.columns else {}
     )
+    dry_season_meta = dry_season_meta or get_active_dry_season_meta() or {}
     training_summary = {
         **training_summary,
         "training_source": training_source,
@@ -2090,6 +2171,10 @@ def read_sentinel_wosis_fraction_rasters(
             str(key): int(value) for key, value in source_counts.items()
         },
         "calicatas_cr_csv": CALICATAS_CR_CSV_PATH.name,
+        "dry_season": dry_season_meta,
+        "dry_season_months": list(get_active_dry_season_months()),
+        "dry_season_source": dry_season_meta.get("source"),
+        "dry_season_source_label": dry_season_meta.get("source_label"),
     }
     auxiliary_rasters = {
         "sentinel_bare_observations": {

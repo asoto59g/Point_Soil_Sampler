@@ -42,7 +42,7 @@ Resumen de lo incorporado en el modo experimental y de lo que el sistema **si** 
 | Radar Sentinel-1 | Coleccion RTC `VV_DB`, `VH_DB`, `VV_VH_DB` (mediana lineal → dB) | Covariable de rugosidad/humedad superficial independiente de nubes opticas |
 | Relieve | DEM CR (Drive / CRTM05) o Copernicus GLO-30; features `ELEV`, `SLOPE_DEG`, `ASPECT_SIN`, `ASPECT_COS`, `CURV` | Sustituye `LON`/`LAT` para forzar aprendizaje espectro + topografia + radar |
 | Bounds de entrenamiento | Union del envelope de perfiles + AOI al extraer DEM/S1 | Evita NaN en perfiles del buffer y corridas con 0 filas validas en AOIs pequenos |
-| Suelo descubierto | Prioridad estacion seca (dic–abr) + umbrales NDVI/NDWI/BSI mas estrictos | Reduce contaminacion por vegetacion/humedad en el compuesto |
+| Suelo descubierto | Prioridad estacion seca dinamica (WorldClim/CHIRPS o selector manual) + umbrales NDVI/NDWI/BSI estrictos | Adapta meses secos al AOI en cualquier region; override manual disponible |
 | Validacion | CV espacial por bloques: MAE ± std entre folds, R² y top features en la UI | Diagnostico exploratorio; no es certificacion de exactitud de campo |
 | Operacion / smoke | Variables de entorno para limitar escenas, arboles RF y escenas S1 | Acelera pruebas E2E sin cambiar el codigo |
 
@@ -82,6 +82,7 @@ Sobre un AOI diminuto cerca de Liberia, Costa Rica, con caps reducidos y entrena
 | --- | --- |
 | `app.py` | UI Streamlit, jobs en segundo plano, clasificacion USDA, vectorizacion y descargas |
 | `experimental_sentinel_wosis.py` | Pipeline experimental: perfiles, S2, RF×3, prediccion, metricas CV |
+| `climate_dry_season.py` | Meses secos por AOI via WorldClim/CHIRPS + modos auto/manual/default CA |
 | `s1_covariates.py` | Busqueda/lectura Sentinel-1 RTC y features VV/VH |
 | `dem_covariates.py` | DEM CR / GLO-30 y derivadas de relieve |
 | `cr_dem_remote.py` | Acceso al MDE publico de Costa Rica (Google Drive / CRTM05) |
@@ -140,7 +141,7 @@ Modo experimental para comparar contra las fuentes globales base. Entrena tres `
 - Area DEM/S1 de entrenamiento: une el bounding box de los perfiles con el del AOI (mas un margen) para que los perfiles del buffer reciban elevacion y backscatter finitos.
 - Area de prediccion: estima arena, limo y arcilla solo dentro del poligono original, a 20 m, y unicamente en pixeles Sentinel-2 clasificados como suelo descubierto.
 - Imagenes: escenas Sentinel-2 L2A disponibles en Microsoft Planetary Computer.
-- Seleccion Sentinel-2: prioriza escenas de **estacion seca** (dic–abr en Centroamerica pacifica), luego menor nubosidad; para entrenamiento tambien prioriza cobertura de perfiles. Limite por defecto: 120 escenas de entrenamiento y 90 de prediccion. Nubosidad de escena `< 60%`.
+- Seleccion Sentinel-2: prioriza escenas de **estacion seca** resuelta por AOI (WorldClim 2.1 precipitacion; fallback CHIRPS; override manual o calendario fijo Centroamerica), luego menor nubosidad; para entrenamiento tambien prioriza cobertura de perfiles. Limite por defecto: 120 escenas de entrenamiento y 90 de prediccion. Nubosidad de escena `< 60%`.
 - Tiempo de ejecucion: la creacion del modelo Sentinel puede tardar bastante mas de 20 minutos porque descarga, lee y procesa muchas escenas y bandas para entrenamiento y prediccion.
 - Acceso Sentinel-2: firma cada asset de Planetary Computer justo antes de leerlo y exige una vigencia minima para evitar tokens vencidos en corridas largas.
 - Compuesto de suelo descubierto (estricto): SCL clase 5 como criterio principal con NDVI ≤ 0.25, NDWI < 0.05 y BSI > −0.10; respaldo restringido con SCL clase 7 (NDVI ≤ 0.18). Las observaciones de estacion seca reciben un bonus en el score de seleccion de la mejor observacion; se combinan mejor observacion y media multitemporal.
@@ -281,6 +282,7 @@ Completado recientemente:
 - [x] Panel UI de CV espacial (MAE/R²) y top features.
 - [x] Correccion de bounds DEM/S1 para perfiles del buffer.
 - [x] Caps por variables de entorno para smoke/E2E.
+- [x] Estacion seca global por WorldClim/CHIRPS + selector manual en Streamlit.
 
 Pendiente:
 
