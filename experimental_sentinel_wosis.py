@@ -128,7 +128,18 @@ SENTINEL_SPECTRAL_FEATURE_NAMES = [
 SENTINEL_MODEL_FEATURE_NAMES = (
     [f"{feature_name}_best" for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES]
     + [f"{feature_name}_mean" for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES]
-    + ["BARE_OBS", "BARE_SCORE", "ELEV", "SLOPE_DEG", "ASPECT_SIN", "ASPECT_COS", "CURV"]
+    + [
+        "BARE_OBS",
+        "BARE_SCORE",
+        "ELEV",
+        "SLOPE_DEG",
+        "ASPECT_SIN",
+        "ASPECT_COS",
+        "CURV",
+        "VV_DB",
+        "VH_DB",
+        "VV_VH_DB",
+    ]
 )
 
 
@@ -1408,6 +1419,32 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
     )
     feature_arrays = attach_dem_features(feature_arrays, dem_features, valid_mask=valid_bare)
 
+    from s1_covariates import s1_feature_arrays_for_grid
+
+    s1_features, s1_meta = s1_feature_arrays_for_grid(
+        poly_geom,
+        grid,
+        status_callback=lambda message: update_status(status_box, message),
+    )
+    feature_arrays = attach_dem_features(feature_arrays, s1_features, valid_mask=valid_bare)
+    s1_ok = (
+        np.isfinite(feature_arrays["VV_DB"])
+        & np.isfinite(feature_arrays["VH_DB"])
+        & np.isfinite(feature_arrays["VV_VH_DB"])
+    )
+    valid_bare = valid_bare & s1_ok
+    if not np.any(valid_bare):
+        raise RuntimeError(
+            "Hay suelo descubierto Sentinel-2, pero no hay cobertura Sentinel-1 RTC "
+            "valida (VV/VH) dentro del poligono. El modelo experimental se detiene."
+        )
+    for feature_name in list(feature_arrays):
+        feature_arrays[feature_name] = np.where(
+            valid_bare,
+            feature_arrays[feature_name],
+            np.nan,
+        ).astype("float32")
+
     summary = {
         "sentinel_collection": SENTINEL_COLLECTION,
         "sentinel_datetime": sentinel_datetime_range(),
@@ -1426,6 +1463,7 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
             2,
         ),
         **dem_meta,
+        **s1_meta,
     }
     return feature_arrays, valid_bare, bare_count, best_score, grid, summary
 
@@ -1533,6 +1571,15 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
         status_callback=lambda message: update_status(status_box, message),
     )
     feature_values = attach_dem_features(feature_values, dem_features)
+
+    from s1_covariates import s1_feature_arrays_for_points
+
+    s1_features, s1_meta = s1_feature_arrays_for_points(
+        samples,
+        poly_geom=poly_geom,
+        status_callback=lambda message: update_status(status_box, message),
+    )
+    feature_values = attach_dem_features(feature_values, s1_features)
     feature_frame = pd.DataFrame(feature_values)
     valid = np.isfinite(best_score)
     valid &= feature_frame.replace([np.inf, -np.inf], np.nan).notna().all(axis=1).to_numpy()
@@ -1540,7 +1587,8 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
     if valid_count < SENTINEL_MIN_WOSIS_SAMPLES:
         raise RuntimeError(
             "No hay suficientes perfiles de entrenamiento con observaciones Sentinel-2 "
-            f"de suelo descubierto ({valid_count}; minimo {SENTINEL_MIN_WOSIS_SAMPLES}). "
+            f"de suelo descubierto y Sentinel-1 RTC ({valid_count}; minimo "
+            f"{SENTINEL_MIN_WOSIS_SAMPLES}). "
             f"Se procesaron {processed_items} escenas Sentinel-2 para "
             f"{len(samples)} perfiles completos y fallaron {len(failed_items)} escenas. "
             "El modelo experimental se detiene. Prueba con un poligono en una zona con "
@@ -1573,6 +1621,7 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
             2,
         ),
         **{f"training_{key}": value for key, value in dem_meta.items()},
+        **{f"training_{key}": value for key, value in s1_meta.items()},
     }
     return x_train, y_train, valid_samples, summary
 

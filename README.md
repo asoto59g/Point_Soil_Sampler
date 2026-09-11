@@ -23,7 +23,7 @@ La app no genera datos simulados: si una fuente remota no responde o no existen 
 - Integra una interfaz Streamlit con fuentes globales de textura y salidas GIS listas para revision.
 - Clasifica textura USDA a partir de fracciones normalizadas de arena, limo y arcilla.
 - Compara fuentes globales base: OpenLandMap-soildb 120 m y SoilGrids250m / ISRIC WCS.
-- Incluye un modo experimental Sentinel-2 + perfiles locales que entrena 3 `RandomForestRegressor` (arena/limo/arcilla, normalizados a 100%) con WoSIS y/o calicatas Costa Rica, covariables Sentinel-2 L2A y DEM.
+- Incluye un modo experimental Sentinel-2/1 + perfiles locales que entrena 3 `RandomForestRegressor` (arena/limo/arcilla, normalizados a 100%) con WoSIS y/o calicatas Costa Rica, covariables Sentinel-2 L2A, Sentinel-1 RTC (VV/VH) y DEM.
 - Exporta capas auxiliares de consistencia, observaciones Sentinel-2 de suelo descubierto, score de suelo descubierto e incertidumbre del modelo experimental.
 
 ## Metodologia Y Algoritmo
@@ -62,9 +62,9 @@ Fuente alternativa global para comparar resultados. Usa el servicio WCS de ISRIC
 - Resolucion: 250 m
 - Metodo 0-30 cm: promedio ponderado por espesor de cada intervalo
 
-### Experimental Sentinel-2 + perfiles (WoSIS / calicatas CR)
+### Experimental Sentinel-2/1 + perfiles (WoSIS / calicatas CR)
 
-Modo experimental para comparar contra las fuentes globales base. Entrena tres `RandomForestRegressor` independientes (arena, limo y arcilla) con observaciones 0-30 cm y covariables Sentinel-2 L2A + DEM; las predicciones se normalizan para sumar 100% antes de clasificar USDA.
+Modo experimental para comparar contra las fuentes globales base. Entrena tres `RandomForestRegressor` independientes (arena, limo y arcilla) con observaciones 0-30 cm y covariables Sentinel-2 L2A + Sentinel-1 RTC + DEM; las predicciones se normalizan para sumar 100% antes de clasificar USDA.
 
 - Entrenamiento: perfiles WoSIS y/o calicatas Costa Rica (`Calicatas_01_02_21_Costa_Rica.csv`) con `sand`, `silt` y `clay`, filtrados a profundidad 0-30 cm.
 - Modelo: un RF por fraccion (no un unico multi-output); post-normalizacion `sum_to_100`.
@@ -81,10 +81,11 @@ Modo experimental para comparar contra las fuentes globales base. Entrena tres `
 - Acceso Sentinel-2: firma cada asset de Planetary Computer justo antes de leerlo y exige una vigencia minima para evitar tokens vencidos en corridas largas.
 - Compuesto: usa SCL clase 5 como criterio fuerte de suelo no vegetado y un respaldo restringido con SCL clase 7; combina la mejor observacion y la media multitemporal de observaciones de suelo descubierto.
 - Resolucion de salida: 20 m.
-- Covariables: bandas visibles, red-edge (`B05`/`B06`/`B07`/`B8A`), NIR, SWIR e indices NDVI, SAVI, MSAVI, BSI, CI, NDWI, GEOI, BI, NDRE y NDRE2 (mejor observacion y media multitemporal), conteo/score de suelo descubierto, y relieve DEM (`ELEV`, `SLOPE_DEG`, `ASPECT_SIN`, `ASPECT_COS`, `CURV`).
+- Covariables: bandas visibles, red-edge (`B05`/`B06`/`B07`/`B8A`), NIR, SWIR e indices NDVI, SAVI, MSAVI, BSI, CI, NDWI, GEOI, BI, NDRE y NDRE2 (mejor observacion y media multitemporal), conteo/score de suelo descubierto, relieve DEM (`ELEV`, `SLOPE_DEG`, `ASPECT_SIN`, `ASPECT_COS`, `CURV`), y backscatter Sentinel-1 RTC (`VV_DB`, `VH_DB`, `VV_VH_DB`).
+- Sentinel-1: coleccion `sentinel-1-rtc` de Planetary Computer; mediana temporal de VV/VH en potencia lineal, convertida a dB; `VV_VH_DB = VV_DB - VH_DB`.
 - DEM en Costa Rica: MDE publico del proyecto [Runoff_CRC](https://github.com/asoto59g/Runoff_CRC) (Google Drive, CRTM05 / EPSG:5367). Si falla, usa Copernicus GLO-30.
 - DEM fuera de Costa Rica: Copernicus DEM GLO-30 via Microsoft Planetary Computer.
-- Las coordenadas `LON`/`LAT` ya no se usan como features, para forzar aprendizaje espectro + topografia.
+- Las coordenadas `LON`/`LAT` ya no se usan como features, para forzar aprendizaje espectro + topografia + radar.
 - Validacion: calcula metricas internas con validacion espacial por grupos cuando hay suficientes perfiles distribuidos.
 - Postproceso: suaviza ligeramente las fracciones arena/limo/arcilla antes de clasificar USDA para reducir ruido salpicado de pixeles aislados.
 

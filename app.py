@@ -147,15 +147,17 @@ SOILGRIDS_SOURCE_DESCRIPTION = (
 )
 SOILGRIDS_CATALOG_URL = "https://docs.isric.org/globaldata/soilgrids/wcs.html"
 SENTINEL_WOSIS_SOURCE_DESCRIPTION = (
-    "Modelo experimental Sentinel-2 L2A + perfiles locales + DEM: entrena 3 Random Forest "
-    "independientes (arena, limo, arcilla) con WoSIS/ISRIC y/o calicatas Costa Rica "
-    "(0-30 cm), covariables multitemporales de suelo descubierto Sentinel-2 "
-    "(incluye red-edge B05-B07/B8A) y relieve (DEM CR en Costa Rica; Copernicus GLO-30 "
-    "fuera de CR); normaliza fracciones a 100% y predice a 20 m."
+    "Modelo experimental Sentinel-2 L2A + Sentinel-1 RTC + perfiles locales + DEM: "
+    "entrena 3 Random Forest independientes (arena, limo, arcilla) con WoSIS/ISRIC "
+    "y/o calicatas Costa Rica (0-30 cm), covariables multitemporales de suelo "
+    "descubierto Sentinel-2 (incluye red-edge B05-B07/B8A), backscatter Sentinel-1 "
+    "RTC (VV/VH en dB) y relieve (DEM CR en Costa Rica; Copernicus GLO-30 fuera de CR); "
+    "normaliza fracciones a 100% y predice a 20 m."
 )
 SENTINEL_WOSIS_CATALOG_URL = (
     "https://docs.isric.org/globaldata/wosis/; "
-    "https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a"
+    "https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a; "
+    "https://planetarycomputer.microsoft.com/dataset/sentinel-1-rtc"
 )
 SOILGRIDS_CRS = "ESRI:54052"
 SOILGRIDS_CRS_WKT = (
@@ -202,12 +204,12 @@ DATA_SOURCES = {
         "network_host": "maps.isric.org",
     },
     "sentinel_wosis": {
-        "name": "Experimental Sentinel-2 + perfiles (20 m)",
+        "name": "Experimental Sentinel-2/1 + perfiles (20 m)",
         "description": SENTINEL_WOSIS_SOURCE_DESCRIPTION,
         "catalog": SENTINEL_WOSIS_CATALOG_URL,
         "layers": {
             "training": "WoSIS y/o calicatas Costa Rica sand/silt/clay 0-30 cm",
-            "imagery": "Sentinel-2 L2A multitemporal bare-soil composite",
+            "imagery": "Sentinel-2 L2A bare-soil + Sentinel-1 RTC VV/VH",
             "dem": "DEM CR (Runoff Drive) o Copernicus GLO-30",
             "model": "3x RandomForestRegressor (sand/silt/clay) + normalize 100%",
         },
@@ -1493,16 +1495,18 @@ def main():
             st.warning(
                 "Modo experimental: entrena 3 Random Forest (arena/limo/arcilla) con "
                 "perfiles WoSIS y/o calicatas Costa Rica, Sentinel-2 de suelo "
-                "descubierto y DEM (MDE publico CR via Google Drive en Costa Rica; "
-                "Copernicus GLO-30 fuera de CR). Normaliza fracciones a 100%. "
-                "Puede ser lento y no sustituye muestreo de campo."
+                "descubierto, Sentinel-1 RTC (VV/VH) y DEM (MDE publico CR via "
+                "Google Drive en Costa Rica; Copernicus GLO-30 fuera de CR). "
+                "Normaliza fracciones a 100%. Puede ser lento y no sustituye "
+                "muestreo de campo."
             )
             st.caption(
                 "Recomendacion: usarlo para comparacion exploratoria contra "
                 "OpenLandMap/SoilGrids y revisar la incertidumbre exportada. "
                 "Las features LON/LAT se reemplazaron por elevacion, pendiente, "
                 "aspecto y curvatura. Cada fraccion tiene su propio RF; "
-                "covariables incluyen red-edge Sentinel-2 (B05-B07, B8A, NDRE)."
+                "covariables incluyen red-edge Sentinel-2 (B05-B07, B8A, NDRE) "
+                "y backscatter Sentinel-1 RTC (VV_DB, VH_DB, VV_VH_DB)."
             )
         st.info(
             f"La corrida necesita conexion a {source_config['network_host']}. Si la fuente real no "
@@ -1602,6 +1606,11 @@ def main():
                     ):
                         dem_label += " (fallback)"
                     sentinel_details.append(f"relieve={dem_label}")
+                s1_items = bare_summary.get("s1_items_used") or uncertainty_summary.get(
+                    "training_s1_items_used"
+                )
+                if s1_items:
+                    sentinel_details.append(f"Sentinel-1 RTC={int(s1_items)} escenas")
                 if "spatial_cv_mae_mean_fraction" in uncertainty_summary:
                     sentinel_details.append(
                         "MAE CV espacial medio "
