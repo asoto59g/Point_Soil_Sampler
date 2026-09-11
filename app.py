@@ -233,7 +233,6 @@ OUTPUT_ROOT = Path("salidas")
 SAVED_POLYGONS_DIR = OUTPUT_ROOT / "poligonos"
 MAX_PIXELS = 2_500_000
 SQM_PER_HA = 10_000.0
-RECENT_JOB_LIMIT = 5
 GDAL_HTTP_OPTIONS = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
     "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif",
@@ -405,14 +404,6 @@ def get_processing_job(job_id):
     with registry["lock"]:
         job = registry["jobs"].get(job_id)
         return job_snapshot(job) if job else None
-
-
-def list_processing_jobs(limit=RECENT_JOB_LIMIT):
-    registry = processing_registry()
-    with registry["lock"]:
-        jobs = [job_snapshot(job) for job in registry["jobs"].values()]
-    jobs.sort(key=lambda job: job.get("started_at") or "", reverse=True)
-    return jobs[:limit]
 
 
 def rerun_app():
