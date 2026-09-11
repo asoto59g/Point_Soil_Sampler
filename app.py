@@ -149,9 +149,9 @@ SOILGRIDS_CATALOG_URL = "https://docs.isric.org/globaldata/soilgrids/wcs.html"
 SENTINEL_WOSIS_SOURCE_DESCRIPTION = (
     "Modelo experimental Sentinel-2 L2A + perfiles locales + DEM: entrena 3 Random Forest "
     "independientes (arena, limo, arcilla) con WoSIS/ISRIC y/o calicatas Costa Rica "
-    "(0-30 cm), covariables multitemporales de suelo descubierto Sentinel-2 y relieve "
-    "(DEM CR en Costa Rica; Copernicus GLO-30 fuera de CR); normaliza fracciones a 100% "
-    "y predice a 20 m."
+    "(0-30 cm), covariables multitemporales de suelo descubierto Sentinel-2 "
+    "(incluye red-edge B05-B07/B8A) y relieve (DEM CR en Costa Rica; Copernicus GLO-30 "
+    "fuera de CR); normaliza fracciones a 100% y predice a 20 m."
 )
 SENTINEL_WOSIS_CATALOG_URL = (
     "https://docs.isric.org/globaldata/wosis/; "
@@ -1501,7 +1501,8 @@ def main():
                 "Recomendacion: usarlo para comparacion exploratoria contra "
                 "OpenLandMap/SoilGrids y revisar la incertidumbre exportada. "
                 "Las features LON/LAT se reemplazaron por elevacion, pendiente, "
-                "aspecto y curvatura. Cada fraccion tiene su propio RF."
+                "aspecto y curvatura. Cada fraccion tiene su propio RF; "
+                "covariables incluyen red-edge Sentinel-2 (B05-B07, B8A, NDRE)."
             )
         st.info(
             f"La corrida necesita conexion a {source_config['network_host']}. Si la fuente real no "

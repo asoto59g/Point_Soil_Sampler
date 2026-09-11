@@ -81,16 +81,37 @@ SENTINEL_ASSET_ALIASES = {
     "blue": ("B02", "blue"),
     "green": ("B03", "green"),
     "red": ("B04", "red"),
+    "rededge1": ("B05", "rededge1"),
+    "rededge2": ("B06", "rededge2"),
+    "rededge3": ("B07", "rededge3"),
     "nir": ("B08", "nir"),
+    "nir08": ("B8A", "nir08"),
     "swir1": ("B11", "swir16"),
     "swir2": ("B12", "swir22"),
     "scl": ("SCL", "scl"),
 }
+# Reflectance assets read per scene (excluding SCL).
+SENTINEL_REFLECTANCE_BANDS = (
+    "blue",
+    "green",
+    "red",
+    "rededge1",
+    "rededge2",
+    "rededge3",
+    "nir",
+    "nir08",
+    "swir1",
+    "swir2",
+)
 SENTINEL_SPECTRAL_FEATURE_NAMES = [
     "B02",
     "B03",
     "B04",
+    "B05",
+    "B06",
+    "B07",
     "B08",
+    "B8A",
     "B11",
     "B12",
     "NDVI",
@@ -101,6 +122,8 @@ SENTINEL_SPECTRAL_FEATURE_NAMES = [
     "NDWI",
     "GEOI",
     "BI",
+    "NDRE",
+    "NDRE2",
 ]
 SENTINEL_MODEL_FEATURE_NAMES = (
     [f"{feature_name}_best" for feature_name in SENTINEL_SPECTRAL_FEATURE_NAMES]
@@ -1049,11 +1072,40 @@ def safe_ratio(numerator, denominator):
         return np.where(np.abs(denominator) > 1e-6, numerator / denominator, np.nan).astype("float32")
 
 
+def read_item_reflectance_bands_grid(item, grid, resampling):
+    return {
+        logical_name: reflectance(
+            read_asset_grid(
+                item_asset_href(item, logical_name),
+                grid["crs"],
+                grid["transform"],
+                grid["width"],
+                grid["height"],
+                resampling,
+            )
+        )
+        for logical_name in SENTINEL_REFLECTANCE_BANDS
+    }
+
+
+def read_item_reflectance_bands_samples(item, samples):
+    return {
+        logical_name: reflectance(
+            read_asset_samples(item_asset_href(item, logical_name), samples)
+        )
+        for logical_name in SENTINEL_REFLECTANCE_BANDS
+    }
+
+
 def derive_sentinel_features(bands):
     blue = bands["blue"]
     green = bands["green"]
     red = bands["red"]
+    rededge1 = bands["rededge1"]
+    rededge2 = bands["rededge2"]
+    rededge3 = bands["rededge3"]
     nir = bands["nir"]
+    nir08 = bands["nir08"]
     swir1 = bands["swir1"]
     swir2 = bands["swir2"]
 
@@ -1065,12 +1117,19 @@ def derive_sentinel_features(bands):
     ndwi = safe_ratio(green - nir, green + nir)
     geoi = safe_ratio(swir1 - swir2, swir1 + swir2)
     bi = np.sqrt(np.maximum(blue**2 + green**2 + red**2, 0)).astype("float32")
+    # Red-edge indices (B8A narrow NIR vs B05/B06) for residual vegetation / soil contrast.
+    ndre = safe_ratio(nir08 - rededge1, nir08 + rededge1)
+    ndre2 = safe_ratio(nir08 - rededge2, nir08 + rededge2)
 
     return {
         "B02": blue,
         "B03": green,
         "B04": red,
+        "B05": rededge1,
+        "B06": rededge2,
+        "B07": rededge3,
         "B08": nir,
+        "B8A": nir08,
         "B11": swir1,
         "B12": swir2,
         "NDVI": ndvi,
@@ -1081,6 +1140,8 @@ def derive_sentinel_features(bands):
         "NDWI": ndwi,
         "GEOI": geoi,
         "BI": bi,
+        "NDRE": ndre,
+        "NDRE2": ndre2,
     }
 
 
@@ -1273,68 +1334,7 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
                 f"{bare_percent:.1f}%; media de observaciones {mean_observations:.1f}.",
             )
             try:
-                bands = {
-                    "blue": reflectance(
-                        read_asset_grid(
-                            item_asset_href(item, "blue"),
-                            grid["crs"],
-                            grid["transform"],
-                            grid["width"],
-                            grid["height"],
-                            Resampling.bilinear,
-                        )
-                    ),
-                    "green": reflectance(
-                        read_asset_grid(
-                            item_asset_href(item, "green"),
-                            grid["crs"],
-                            grid["transform"],
-                            grid["width"],
-                            grid["height"],
-                            Resampling.bilinear,
-                        )
-                    ),
-                    "red": reflectance(
-                        read_asset_grid(
-                            item_asset_href(item, "red"),
-                            grid["crs"],
-                            grid["transform"],
-                            grid["width"],
-                            grid["height"],
-                            Resampling.bilinear,
-                        )
-                    ),
-                    "nir": reflectance(
-                        read_asset_grid(
-                            item_asset_href(item, "nir"),
-                            grid["crs"],
-                            grid["transform"],
-                            grid["width"],
-                            grid["height"],
-                            Resampling.bilinear,
-                        )
-                    ),
-                    "swir1": reflectance(
-                        read_asset_grid(
-                            item_asset_href(item, "swir1"),
-                            grid["crs"],
-                            grid["transform"],
-                            grid["width"],
-                            grid["height"],
-                            Resampling.bilinear,
-                        )
-                    ),
-                    "swir2": reflectance(
-                        read_asset_grid(
-                            item_asset_href(item, "swir2"),
-                            grid["crs"],
-                            grid["transform"],
-                            grid["width"],
-                            grid["height"],
-                            Resampling.bilinear,
-                        )
-                    ),
-                }
+                bands = read_item_reflectance_bands_grid(item, grid, Resampling.bilinear)
                 scl = np.ma.filled(
                     read_asset_grid(
                         item_asset_href(item, "scl"),
@@ -1477,14 +1477,7 @@ def extract_training_features_from_sentinel(samples, status_box=None, poly_geom=
                 f"{mean_observations:.1f}.",
             )
             try:
-                bands = {
-                    "blue": reflectance(read_asset_samples(item_asset_href(item, "blue"), samples)),
-                    "green": reflectance(read_asset_samples(item_asset_href(item, "green"), samples)),
-                    "red": reflectance(read_asset_samples(item_asset_href(item, "red"), samples)),
-                    "nir": reflectance(read_asset_samples(item_asset_href(item, "nir"), samples)),
-                    "swir1": reflectance(read_asset_samples(item_asset_href(item, "swir1"), samples)),
-                    "swir2": reflectance(read_asset_samples(item_asset_href(item, "swir2"), samples)),
-                }
+                bands = read_item_reflectance_bands_samples(item, samples)
                 scl = read_asset_samples(item_asset_href(item, "scl"), samples).astype("int16")
             except Exception as exc:
                 failed_items.append((item.id, str(exc)))
