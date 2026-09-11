@@ -291,7 +291,15 @@ def terrain_feature_arrays_for_points(points_gdf, poly_geom=None, status_callbac
         return empty, {"dem_source": None, "dem_fallback_used": False}
 
     points = points_gdf.to_crs("EPSG:4326") if points_gdf.crs else points_gdf.set_crs("EPSG:4326")
-    ref_geom = poly_geom if poly_geom is not None else box(*points.total_bounds)
+    # Load DEM over the training point cloud (not only the prediction AOI).
+    # Using the tiny AOI leaves distant buffer profiles with NaN terrain features.
+    minx, miny, maxx, maxy = (float(value) for value in points.total_bounds)
+    if poly_geom is not None:
+        pminx, pminy, pmaxx, pmaxy = (float(value) for value in poly_geom.bounds)
+        minx, miny = min(minx, pminx), min(miny, pminy)
+        maxx, maxy = max(maxx, pmaxx), max(maxy, pmaxy)
+    pad_deg = max((maxx - minx), (maxy - miny), 0.05) * 0.02
+    ref_geom = box(minx - pad_deg, miny - pad_deg, maxx + pad_deg, maxy + pad_deg)
 
     points_metric = gpd.GeoDataFrame(geometry=points.geometry, crs="EPSG:4326")
     try:

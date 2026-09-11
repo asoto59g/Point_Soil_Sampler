@@ -15,7 +15,7 @@ from rasterio.warp import transform as transform_coordinates
 S1_STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 S1_COLLECTION = "sentinel-1-rtc"
 S1_DATETIME_START = "2019-01-01"
-S1_MAX_ITEMS = 30
+S1_MAX_ITEMS = int(__import__("os").getenv("S1_MAX_ITEMS", "30"))
 S1_MAX_ITEM_FAILURES = 12
 S1_LINEAR_FLOOR = 1e-7
 S1_FEATURE_NAMES = ("VV_DB", "VH_DB", "VV_VH_DB")
@@ -270,11 +270,13 @@ def s1_feature_arrays_for_points(
         if getattr(points_gdf, "crs", None)
         else gpd.GeoDataFrame(points_gdf).set_crs("EPSG:4326")
     )
+    # Always cover the training point cloud. Using only the prediction AOI
+    # leaves distant buffer profiles without VV/VH and drops them from training.
+    minx, miny, maxx, maxy = (float(value) for value in points.total_bounds)
     if poly_geom is not None:
-        bounds = tuple(float(value) for value in poly_geom.bounds)
-    else:
-        bounds = tuple(float(value) for value in points.total_bounds)
-    minx, miny, maxx, maxy = bounds
+        pminx, pminy, pmaxx, pmaxy = (float(value) for value in poly_geom.bounds)
+        minx, miny = min(minx, pminx), min(miny, pminy)
+        maxx, maxy = max(maxx, pmaxx), max(maxy, pmaxy)
     pad = max((maxx - minx), (maxy - miny), 0.05) * 0.05
     bounds = (minx - pad, miny - pad, maxx + pad, maxy + pad)
 
