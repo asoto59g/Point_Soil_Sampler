@@ -231,6 +231,7 @@ DATA_SOURCES = {
 DEFAULT_SOURCE_KEY = "openlandmap"
 OUTPUT_ROOT = Path("salidas")
 SAVED_POLYGONS_DIR = OUTPUT_ROOT / "poligonos"
+ACTIVE_JOB_PATH = OUTPUT_ROOT / ".active_processing_job"
 MAX_PIXELS = 2_500_000
 SQM_PER_HA = 10_000.0
 GDAL_HTTP_OPTIONS = {
@@ -404,6 +405,100 @@ def get_processing_job(job_id):
     with registry["lock"]:
         job = registry["jobs"].get(job_id)
         return job_snapshot(job) if job else None
+
+
+def remember_active_job(job_id):
+    """Persist the active job id so a refreshed/revisited page can reattach."""
+    if not job_id:
+        return
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    ACTIVE_JOB_PATH.write_text(str(job_id), encoding="utf-8")
+    try:
+        st.query_params["job"] = str(job_id)
+    except Exception:
+        pass
+
+
+def clear_remembered_job(job_id=None):
+    try:
+        current = st.query_params.get("job")
+        if job_id is None or current == job_id:
+            if "job" in st.query_params:
+                del st.query_params["job"]
+    except Exception:
+        pass
+    if not ACTIVE_JOB_PATH.exists():
+        return
+    try:
+        stored = ACTIVE_JOB_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        stored = None
+    if job_id is None or stored == job_id:
+        try:
+            ACTIVE_JOB_PATH.unlink()
+        except OSError:
+            pass
+
+
+def read_remembered_job_id():
+    try:
+        query_job = st.query_params.get("job")
+        if query_job:
+            return str(query_job)
+    except Exception:
+        pass
+    if not ACTIVE_JOB_PATH.exists():
+        return None
+    try:
+        stored = ACTIVE_JOB_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return stored or None
+
+
+def attach_processing_job(job_id):
+    """Bind a registry job to this browser session without restarting it."""
+    job = get_processing_job(job_id)
+    if not job:
+        return None
+    st.session_state.processing_job_id = job["id"]
+    if job["state"] == "running":
+        remember_active_job(job["id"])
+        return job
+    if job["state"] == "complete" and job.get("result") and not st.session_state.get("result"):
+        load_completed_job_result(job)
+        clear_remembered_job(job["id"])
+        return job
+    if job["state"] == "error":
+        # Keep id so render_current_processing_job can show the traceback once.
+        clear_remembered_job(job["id"])
+        return job
+    return job
+
+
+def recover_processing_job_session():
+    """Reattach after leaving/reloading the page.
+
+    Streamlit session_state is lost when the browser session ends, which made
+    long Sentinel runs look cancelled even while the background thread continued.
+    Recover from URL ?job=... or the on-disk active-job marker.
+    """
+    current_id = st.session_state.get("processing_job_id")
+    if current_id:
+        job = get_processing_job(current_id)
+        if job:
+            if job["state"] == "running":
+                remember_active_job(current_id)
+            return job
+        st.session_state.processing_job_id = None
+
+    remembered = read_remembered_job_id()
+    if not remembered:
+        return None
+    job = attach_processing_job(remembered)
+    if job is None:
+        clear_remembered_job(remembered)
+    return job
 
 
 def rerun_app():
@@ -1386,6 +1481,7 @@ def load_completed_job_result(job):
         return False
     st.session_state.result = result
     st.session_state.processing_job_id = None
+    clear_remembered_job(job.get("id"))
     return True
 
 
@@ -1396,12 +1492,13 @@ def render_current_processing_job():
 
     state = job["state"]
     if state == "running":
+        remember_active_job(job["id"])
         st.info(job["message"])
         st.caption(
             f"Proceso en segundo plano: {job['source_name']} | "
             f"Inicio: {job['started_at']} | Ultima actualizacion: {job['updated_at']}. "
-            "Si la pagina deja de actualizarse sola, usa «Actualizar estado»; "
-            "el muestreo sigue corriendo."
+            "Puedes salir y volver: el muestreo sigue en el servidor. "
+            "Si la pagina no se actualiza sola, usa «Actualizar estado»."
         )
         if st.button("Actualizar estado", key="refresh_processing_job"):
             rerun_app()
@@ -1414,11 +1511,13 @@ def render_current_processing_job():
             st.success(job["message"])
         else:
             st.error("El proceso termino, pero no se encontro el resultado en memoria.")
+            clear_remembered_job(job.get("id"))
         return False
 
     if state == "error":
         st.session_state.processing_job_id = None
         st.session_state.result = None
+        clear_remembered_job(job.get("id"))
         st.error(job["message"])
         with st.expander("Detalle tecnico"):
             st.code(job.get("traceback") or job["message"])
@@ -1519,6 +1618,8 @@ def main():
         st.session_state.dry_season_n_driest = DEFAULT_N_DRIEST_MONTHS
     if "processing_job_id" not in st.session_state:
         st.session_state.processing_job_id = None
+
+    recover_processing_job_session()
 
     st.title("Metodologia Establecimiento Puntos de Muestreo de Suelos")
     st.markdown(
@@ -1732,6 +1833,7 @@ def main():
                         dry_season_months=dry_season_months,
                         dry_season_n_driest=dry_season_n_driest,
                     )
+                    remember_active_job(st.session_state.processing_job_id)
                     st.session_state.result = None
                     rerun_app()
                 except Exception as exc:
