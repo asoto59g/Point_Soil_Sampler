@@ -1409,8 +1409,8 @@ def render_current_processing_job():
         st.caption(
             f"Proceso en segundo plano: {job['source_name']} | "
             f"Inicio: {job['started_at']} | Ultima actualizacion: {job['updated_at']}. "
-            "Si la pagina deja de actualizarse sola, usa «Actualizar estado» o "
-            "«Seguir proceso» en Procesos recientes; el muestreo sigue corriendo."
+            "Si la pagina deja de actualizarse sola, usa «Actualizar estado»; "
+            "el muestreo sigue corriendo."
         )
         if st.button("Actualizar estado", key="refresh_processing_job"):
             rerun_app()
@@ -1434,37 +1434,6 @@ def render_current_processing_job():
         return False
 
     return False
-
-
-def render_recent_processing_jobs():
-    jobs = list_processing_jobs()
-    if not jobs:
-        return
-
-    current_job_id = st.session_state.get("processing_job_id")
-    visible_jobs = [job for job in jobs if job["id"] != current_job_id]
-    if not visible_jobs:
-        return
-
-    running_jobs = [job for job in visible_jobs if job["state"] == "running"]
-    with st.expander("Procesos recientes", expanded=bool(running_jobs)):
-        for job in visible_jobs:
-            st.write(
-                f"`{job['id']}` | {job['source_name']} | {job['state']} | "
-                f"Inicio: {job['started_at']} | {job['message']}"
-            )
-            if job["state"] == "complete":
-                if st.button("Cargar resultado", key=f"load_job_{job['id']}"):
-                    if load_completed_job_result(job):
-                        rerun_app()
-            elif job["state"] == "running":
-                if st.button("Seguir proceso", key=f"follow_job_{job['id']}"):
-                    st.session_state.processing_job_id = job["id"]
-                    rerun_app()
-            elif job["state"] == "error":
-                with st.expander(f"Detalle tecnico {job['id']}"):
-                    st.code(job.get("traceback") or job["message"])
-
 
 
 def render_sentinel_spatial_cv_panel(uncertainty_summary):
@@ -1778,7 +1747,6 @@ def main():
                     st.error(str(exc))
 
         render_current_processing_job()
-        render_recent_processing_jobs()
 
         if st.session_state.result:
             result = st.session_state.result
