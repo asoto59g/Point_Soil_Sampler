@@ -1123,8 +1123,19 @@ def read_asset_grid(href, target_crs, transform, width, height, resampling):
             return vrt.read(1, masked=True)
 
 
+def masked_to_float32(values, fill_value=np.nan):
+    """Convert raster values to float32, preserving masks as fill_value.
+
+    Planetary Computer Sentinel-2 reflectance assets are often uint16. Filling a
+    uint16 masked array directly with np.nan raises TypeError on NumPy >=1.24 /
+    Python 3.14, so cast to float before applying the fill.
+    """
+    masked = np.ma.asarray(values)
+    return masked.astype("float32").filled(fill_value)
+
+
 def reflectance(values):
-    array = np.ma.filled(values, np.nan).astype("float32")
+    array = masked_to_float32(values, np.nan)
     array = np.where(array > 1.5, array / 10000.0, array)
     return np.where((array >= 0) & (array <= 1.5), array, np.nan).astype("float32")
 
@@ -1730,7 +1741,7 @@ def normalize_texture_fractions(values):
 
 
 def neighborhood_mean(values, valid_mask, radius, min_neighbors):
-    values = np.ma.filled(values, np.nan).astype("float32")
+    values = masked_to_float32(values, np.nan)
     finite = valid_mask & np.isfinite(values)
     if radius <= 0 or not np.any(finite):
         return np.where(finite, values, np.nan).astype("float32")
