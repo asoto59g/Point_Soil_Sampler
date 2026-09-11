@@ -1174,6 +1174,16 @@ def masked_to_float32(values, fill_value=np.nan):
     return masked.astype("float32").filled(fill_value)
 
 
+def masked_classification_to_int16(values, fill_value=-1):
+    """Convert classification rasters (e.g. SCL uint8) to int16 with signed fill.
+
+    Sentinel-2 SCL is typically uint8. Filling a uint8 masked array with -1
+    raises TypeError on NumPy >=1.24 / Python 3.14, so widen to int16 first.
+    """
+    masked = np.ma.asarray(values)
+    return masked.astype("int16").filled(fill_value)
+
+
 def reflectance(values):
     array = masked_to_float32(values, np.nan)
     array = np.where(array > 1.5, array / 10000.0, array)
@@ -1451,7 +1461,7 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
             )
             try:
                 bands = read_item_reflectance_bands_grid(item, grid, Resampling.bilinear)
-                scl = np.ma.filled(
+                scl = masked_classification_to_int16(
                     read_asset_grid(
                         item_asset_href(item, "scl"),
                         grid["crs"],
@@ -1461,7 +1471,7 @@ def build_sentinel_bare_soil_composite(poly_geom, status_box=None, max_pixels=2_
                         Resampling.nearest,
                     ),
                     -1,
-                ).astype("int16")
+                )
             except Exception as exc:
                 failed_items.append((item.id, str(exc)))
                 update_status(
