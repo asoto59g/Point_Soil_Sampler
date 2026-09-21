@@ -17,12 +17,13 @@ import rasterio
 from owslib.wcs import WebCoverageService
 from rasterio.crs import CRS
 from rasterio.errors import RasterioIOError
-from rasterio.features import shapes
+from rasterio.features import geometry_mask, rasterize, shapes
 from rasterio.io import MemoryFile
 from rasterio.mask import mask as raster_mask
+from rasterio.transform import from_origin
 from rasterio.warp import Resampling, reproject
 from rasterio.windows import from_bounds
-from shapely.geometry import mapping, shape
+from shapely.geometry import MultiPoint, box, mapping, shape
 
 from climate_dry_season import (
     DEFAULT_DRY_SEASON_MONTHS,
@@ -44,6 +45,10 @@ TRAINING_SOURCE_OPTIONS = {
     TRAINING_SOURCE_BOTH: "WoSIS + calicatas Costa Rica",
 }
 DEFAULT_TRAINING_SOURCE = TRAINING_SOURCE_BOTH
+CALICATAS_CR_PROFILE_ID_OFFSET = 10_000_000
+THIESSEN_CALICATAS_BUFFER_KM = 250
+THIESSEN_TARGET_RESOLUTION_M = 30
+THIESSEN_MIN_CALICATAS = 3
 
 _EXPERIMENTAL_READER = None
 _EXPERIMENTAL_IMPORT_ERROR = None
@@ -225,6 +230,13 @@ VISNIR_CALICATAS_SOURCE_DESCRIPTION = (
     "laboratorio ni fotos de dron directamente; es una base operativa para "
     "comparar y extender cuando existan esas mediciones."
 )
+THIESSEN_CALICATAS_SOURCE_DESCRIPTION = (
+    "Poligonos de Thiessen/Voronoi desde calicatas Costa Rica 0-30 cm: usa "
+    "arena/limo/arcilla medidas, genera celdas de influencia para las calicatas "
+    f"dentro de un buffer de {THIESSEN_CALICATAS_BUFFER_KM} km, conserva solo "
+    "las celdas que intersectan el poligono de estudio y las recorta al AOI. "
+    "No interpola gradientes ni usa imagenes satelitales."
+)
 SOILGRIDS_CRS = "ESRI:54052"
 SOILGRIDS_CRS_WKT = (
     'PROJCS["World_Goode_Homolosine_Land",'
@@ -320,6 +332,24 @@ DATA_SOURCES = {
         "reader": "sentinel_wosis",
         "fixed_training_source": TRAINING_SOURCE_CALICATAS_CR,
         "visnir_proxy": True,
+    },
+    "thiessen_calicatas_cr": {
+        "name": "Thiessen calicatas Costa Rica (vectorial / raster 30 m)",
+        "description": THIESSEN_CALICATAS_SOURCE_DESCRIPTION,
+        "catalog": "Calicatas_01_02_21_Costa_Rica.csv",
+        "layers": {
+            "calicatas": "Calicatas Costa Rica arena/limo/arcilla 0-30 cm",
+            "geometry": "Poligonos de Thiessen/Voronoi recortados al AOI",
+            "raster": "Rasterizacion de clase USDA a 30 m para compatibilidad GIS",
+        },
+        "resolution_label": "Thiessen vectorial / raster 30 m",
+        "resolution_slug": "thiessen_calicatas_cr",
+        "network_host": "archivo local Calicatas_01_02_21_Costa_Rica.csv",
+        "reader": "thiessen_calicatas",
+        "local_source": True,
+        "buffer_km": THIESSEN_CALICATAS_BUFFER_KM,
+        "raster_resolution_m": THIESSEN_TARGET_RESOLUTION_M,
+        "zones_alias_filename": "poligonos_thiessen_calicatas.geojson",
     },
 }
 DEFAULT_SOURCE_KEY = "openlandmap"
@@ -772,6 +802,236 @@ def align_band_to_grid(band, src_transform, src_crs, dst_shape, dst_transform, d
     return np.ma.masked_invalid(destination)
 
 
+def build_metric_grid_for_polygon(poly_geom, resolution_m, max_pixels, source_label):
+    polygon_gdf = gpd.GeoDataFrame(geometry=[poly_geom], crs="EPSG:4326")
+    target_crs = estimate_area_crs(polygon_gdf)
+    metric_geom = polygon_gdf.to_crs(target_crs).geometry.iloc[0]
+    minx, miny, maxx, maxy = metric_geom.bounds
+    width = int(np.ceil((maxx - minx) / resolution_m))
+    height = int(np.ceil((maxy - miny) / resolution_m))
+    pixel_count = width * height
+    if width <= 0 or height <= 0:
+        raise ValueError(f"El poligono es demasiado pequeno para {source_label}.")
+    if pixel_count > max_pixels:
+        raise ValueError(
+            f"{source_label} genera demasiados pixeles para una corrida interactiva "
+            f"({pixel_count:,}; limite {max_pixels:,}) a {resolution_m:g} m."
+        )
+    transform = from_origin(minx, maxy, resolution_m, resolution_m)
+    mask = geometry_mask(
+        [mapping(metric_geom)],
+        out_shape=(height, width),
+        transform=transform,
+        invert=True,
+        all_touched=True,
+    )
+    return {
+        "crs": target_crs,
+        "geometry": metric_geom,
+        "transform": transform,
+        "width": width,
+        "height": height,
+        "pixel_count": pixel_count,
+        "mask": mask,
+    }
+
+
+def load_calicatas_cr_for_thiessen(poly_geom, status_box=None):
+    try:
+        from experimental_sentinel_wosis import load_calicatas_cr_texture_samples
+    except Exception as exc:
+        raise RuntimeError(
+            "No se pudo cargar el lector de calicatas Costa Rica. "
+            f"{type(exc).__name__}: {_scrub_exception_paths(exc)}"
+        ) from exc
+
+    samples = load_calicatas_cr_texture_samples(
+        poly_geom,
+        status_box=status_box,
+        require_minimum=False,
+    )
+    if samples.empty or len(samples) < THIESSEN_MIN_CALICATAS:
+        raise RuntimeError(
+            "No hay suficientes calicatas Costa Rica 0-30 cm cerca del poligono "
+            f"para crear Thiessen ({len(samples):,}; minimo {THIESSEN_MIN_CALICATAS})."
+        )
+    return samples
+
+
+def prepare_thiessen_calicata_samples(samples):
+    samples = samples.copy()
+    samples = samples.dropna(subset=["profile_id", "sand", "silt", "clay", "geometry"])
+    samples = samples[~samples.geometry.is_empty].copy()
+    texture_ids, _ = classify_usda_texture(
+        samples["sand"].to_numpy(dtype="float32"),
+        samples["silt"].to_numpy(dtype="float32"),
+        samples["clay"].to_numpy(dtype="float32"),
+    )
+    samples["texture_id"] = texture_ids.astype(int)
+    samples = samples[samples["texture_id"] > 0].copy()
+    if samples.empty or len(samples) < THIESSEN_MIN_CALICATAS:
+        raise RuntimeError(
+            "Las calicatas Costa Rica cercanas no tienen fracciones validas "
+            "suficientes para clasificar textura USDA."
+        )
+    samples["Textura"] = samples["texture_id"].map(USDA_CLASSES)
+    samples["calicata_id"] = samples["profile_id"].apply(
+        lambda value: (
+            int(value - CALICATAS_CR_PROFILE_ID_OFFSET)
+            if int(value) >= CALICATAS_CR_PROFILE_ID_OFFSET
+            else int(value)
+        )
+    )
+    samples["calicata_lon"] = samples.geometry.x
+    samples["calicata_lat"] = samples.geometry.y
+    return samples.reset_index(drop=True)
+
+
+def drop_duplicate_thiessen_points(samples_metric, status_box=None):
+    samples_metric = samples_metric.copy()
+    samples_metric["_x_key"] = samples_metric.geometry.x.round(3)
+    samples_metric["_y_key"] = samples_metric.geometry.y.round(3)
+    before = len(samples_metric)
+    samples_metric = samples_metric.drop_duplicates(
+        subset=["_x_key", "_y_key"],
+        keep="first",
+    ).drop(columns=["_x_key", "_y_key"])
+    dropped = before - len(samples_metric)
+    if dropped and status_box:
+        status_box.info(
+            f"Se omitieron {dropped:,} calicatas con coordenadas duplicadas para Thiessen."
+        )
+    if len(samples_metric) < THIESSEN_MIN_CALICATAS:
+        raise RuntimeError(
+            "Quedaron muy pocas coordenadas unicas de calicatas para crear Thiessen."
+        )
+    return samples_metric.reset_index(drop=True)
+
+
+def build_calicatas_thiessen_zones(poly_geom, source_config, status_box=None):
+    try:
+        from shapely.ops import voronoi_diagram
+    except Exception as exc:
+        raise RuntimeError(
+            "La opcion Thiessen requiere Shapely con soporte de voronoi_diagram "
+            "(Shapely >= 2.0 en requirements.txt)."
+        ) from exc
+
+    if status_box:
+        status_box.info("Cargando y clasificando calicatas Costa Rica 0-30 cm...")
+    samples = prepare_thiessen_calicata_samples(
+        load_calicatas_cr_for_thiessen(poly_geom, status_box=status_box)
+    )
+
+    grid = build_metric_grid_for_polygon(
+        poly_geom,
+        float(source_config["raster_resolution_m"]),
+        MAX_PIXELS,
+        "Thiessen calicatas Costa Rica",
+    )
+    aoi_metric = grid["geometry"]
+    samples_metric = samples.to_crs(grid["crs"])
+    samples_metric = drop_duplicate_thiessen_points(samples_metric, status_box=status_box)
+
+    if status_box:
+        status_box.info(
+            "Generando poligonos de Thiessen y recortando celdas que afectan al AOI..."
+        )
+
+    point_coords = np.column_stack(
+        (
+            samples_metric.geometry.x.to_numpy(dtype="float64"),
+            samples_metric.geometry.y.to_numpy(dtype="float64"),
+        )
+    )
+    minx, miny, maxx, maxy = aoi_metric.bounds
+    sample_minx, sample_miny, sample_maxx, sample_maxy = samples_metric.total_bounds
+    margin = max(float(source_config["raster_resolution_m"]) * 10.0, 1000.0)
+    envelope = box(
+        min(minx, sample_minx) - margin,
+        min(miny, sample_miny) - margin,
+        max(maxx, sample_maxx) + margin,
+        max(maxy, sample_maxy) + margin,
+    )
+    diagram = voronoi_diagram(
+        MultiPoint([tuple(coord) for coord in point_coords]),
+        envelope=envelope,
+        edges=False,
+    )
+
+    zone_records = []
+    for cell in iter_polygon_parts(diagram):
+        if cell.is_empty or cell.area <= 0:
+            continue
+        clipped = cell.intersection(aoi_metric)
+        if clipped.is_empty or clipped.area <= 0:
+            continue
+        rep = cell.representative_point()
+        distances = (point_coords[:, 0] - rep.x) ** 2 + (point_coords[:, 1] - rep.y) ** 2
+        nearest_idx = int(np.argmin(distances))
+        sample = samples_metric.iloc[nearest_idx]
+        sample_distance_m = float(sample.geometry.distance(aoi_metric))
+        sample_inside_aoi = bool(sample.geometry.intersects(aoi_metric))
+        for part in iter_polygon_parts(clipped):
+            if part.is_empty or part.area <= 0:
+                continue
+            zone_records.append(
+                {
+                    "texture_id": int(sample["texture_id"]),
+                    "Textura": sample["Textura"],
+                    "calicata_id": int(sample["calicata_id"]),
+                    "profile_id": int(sample["profile_id"]),
+                    "sand": round(float(sample["sand"]), 2),
+                    "silt": round(float(sample["silt"]), 2),
+                    "clay": round(float(sample["clay"]), 2),
+                    "calicata_lon": round(float(sample["calicata_lon"]), 7),
+                    "calicata_lat": round(float(sample["calicata_lat"]), 7),
+                    "calicata_en_poligono": sample_inside_aoi,
+                    "distancia_calicata_a_poligono_m": round(sample_distance_m, 2),
+                    "geometry": part,
+                }
+            )
+
+    if not zone_records:
+        raise RuntimeError(
+            "No se generaron poligonos de Thiessen que intersecten el poligono de estudio."
+        )
+
+    zones = gpd.GeoDataFrame(zone_records, geometry="geometry", crs=grid["crs"])
+    zones["zona_id"] = np.arange(1, len(zones) + 1)
+    summary = {
+        "method": "thiessen_calicatas_cr",
+        "buffer_km": source_config["buffer_km"],
+        "calicatas_loaded": int(len(samples)),
+        "calicatas_unique_coordinates": int(len(samples_metric)),
+        "calicatas_affecting_aoi": int(zones["profile_id"].nunique()),
+        "thiessen_polygon_count": int(len(zones)),
+        "raster_resolution_m": float(source_config["raster_resolution_m"]),
+    }
+    return zones, grid, summary
+
+
+def rasterize_texture_zones(zones, grid):
+    raster_shapes = [
+        (part, int(row["texture_id"]))
+        for _, row in zones.iterrows()
+        for part in iter_polygon_parts(row.geometry)
+        if part is not None and not part.is_empty and part.area > 0
+    ]
+    if not raster_shapes:
+        raise RuntimeError("No hay poligonos Thiessen validos para rasterizar.")
+    texture_grid = rasterize(
+        raster_shapes,
+        out_shape=(grid["height"], grid["width"]),
+        transform=grid["transform"],
+        fill=NODATA_CLASS,
+        dtype="int16",
+        all_touched=True,
+    )
+    texture_grid = np.where(grid["mask"], texture_grid, NODATA_CLASS).astype("int16")
+    return texture_grid, int(np.count_nonzero(texture_grid))
+
+
 def read_openlandmap_fraction_rasters(poly_geom, source_config, status_box=None):
     arrays = {}
     intervals = {}
@@ -1191,6 +1451,11 @@ def build_sampling_points(zones):
     zones_metric = zones.to_crs(area_crs) if zones.crs else zones.set_crs("EPSG:4326").to_crs(area_crs)
     point_records = []
     unit_records = []
+    extra_columns = [
+        column
+        for column in zones_metric.columns
+        if column not in {"geometry", "zona_id", "texture_id", "Textura"}
+    ]
 
     for _, zone in zones_metric.iterrows():
         zone_area_ha = zone.geometry.area / SQM_PER_HA
@@ -1200,6 +1465,14 @@ def build_sampling_points(zones):
             "Textura": zone["Textura"],
             "area_zona_ha": round(zone_area_ha, 4),
         }
+        for column in extra_columns:
+            value = zone[column]
+            if pd.isna(value):
+                base_record[column] = None
+            elif isinstance(value, np.generic):
+                base_record[column] = value.item()
+            else:
+                base_record[column] = value
         unit_records.append({**base_record, "geometry": zone.geometry})
         point_records.append(
             {**base_record, "metodo_punto": "centroide", "geometry": zone.geometry.centroid}
@@ -1225,6 +1498,7 @@ def build_sampling_points(zones):
         "Lon",
         "geometry",
     ]
+    point_columns = point_columns[:-1] + extra_columns + ["geometry"]
     unit_columns = [
         "ID_Unidad",
         "zona_id",
@@ -1233,6 +1507,7 @@ def build_sampling_points(zones):
         "area_zona_ha",
         "geometry",
     ]
+    unit_columns = unit_columns[:-1] + extra_columns + ["geometry"]
     return points[point_columns], sampling_units[unit_columns]
 
 
@@ -1276,6 +1551,7 @@ def write_outputs(
     pixel_count,
     source_config,
     auxiliary_rasters=None,
+    extra_metadata=None,
 ):
     output_dir = next_output_dir()
     raster_path = output_dir / f"raster_textura_{source_config['resolution_slug']}.tif"
@@ -1347,6 +1623,13 @@ def write_outputs(
         "metadata": metadata_path,
     }
 
+    zones_alias_filename = source_config.get("zones_alias_filename")
+    if zones_alias_filename:
+        zones_alias_path = output_dir / zones_alias_filename
+        zones_alias_path.write_text(zones_out.to_json(), encoding="utf-8")
+        files["thiessen_polygons_geojson"] = zones_alias_path
+        metadata["outputs"]["thiessen_polygons_geojson"] = zones_alias_path.name
+
     auxiliary_rasters = auxiliary_rasters or {}
     auxiliary_metadata = {}
     for key, raster in auxiliary_rasters.items():
@@ -1368,10 +1651,58 @@ def write_outputs(
         }
     if auxiliary_metadata:
         metadata["auxiliary_rasters"] = auxiliary_metadata
+    if extra_metadata:
+        metadata["method_summary"] = extra_metadata
 
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     return files, output_dir
+
+
+def process_thiessen_calicatas_sampling(poly_geom, source_key, source_config, status_box=None):
+    zones, grid, thiessen_summary = build_calicatas_thiessen_zones(
+        poly_geom,
+        source_config,
+        status_box=status_box,
+    )
+    if status_box:
+        status_box.info("Rasterizando poligonos de Thiessen para compatibilidad GIS...")
+    texture_grid, valid_pixels = rasterize_texture_zones(zones, grid)
+    if valid_pixels == 0:
+        raise RuntimeError("La rasterizacion Thiessen no produjo pixeles validos.")
+
+    if status_box:
+        status_box.info("Creando puntos de muestreo desde poligonos Thiessen...")
+    points, sampling_units = build_sampling_points(zones)
+    files, output_dir = write_outputs(
+        texture_grid,
+        grid["transform"],
+        grid["crs"],
+        zones,
+        points,
+        sampling_units,
+        grid["pixel_count"],
+        source_config,
+        auxiliary_rasters=None,
+        extra_metadata=thiessen_summary,
+    )
+
+    return {
+        "zones": zones,
+        "points": points,
+        "sampling_units": sampling_units,
+        "files": files,
+        "output_dir": output_dir,
+        "valid_pixels": valid_pixels,
+        "pixel_count": grid["pixel_count"],
+        "source_key": source_key,
+        "source_name": source_config["name"],
+        "resolution_label": source_config["resolution_label"],
+        "training_source": None,
+        "training_source_label": None,
+        "auxiliary_rasters": {},
+        "thiessen_summary": thiessen_summary,
+    }
 
 
 def process_sampling(
@@ -1385,6 +1716,14 @@ def process_sampling(
 ):
     source_config = get_source_config(source_key)
     poly_geom = validate_polygon(geometry)
+    if source_config.get("reader") == "thiessen_calicatas":
+        return process_thiessen_calicatas_sampling(
+            poly_geom,
+            source_key,
+            source_config,
+            status_box=status_box,
+        )
+
     fractions, transform, crs, pixel_count, auxiliary_rasters = read_soil_fraction_rasters(
         poly_geom,
         source_key,
@@ -1602,6 +1941,15 @@ def render_downloads(files, result):
             1,
             ("Consistencia intervalo 68% (TIF)", "certainty_mask", "image/tiff"),
         )
+    if "thiessen_polygons_geojson" in files:
+        download_items.insert(
+            2,
+            (
+                "Poligonos Thiessen calicatas CR (GeoJSON)",
+                "thiessen_polygons_geojson",
+                "application/geo+json",
+            ),
+        )
     if "sentinel_bare_observations" in files:
         download_items.insert(
             1,
@@ -1792,7 +2140,7 @@ def main():
     st.caption(
         "Fuentes reales disponibles: OpenLandMap-soildb 120 m y 30 m, SoilGrids250m / "
         "ISRIC WCS, modo experimental Sentinel-2 + WoSIS y modo Vis-NIR/proxy "
-        "+ calicatas CR. No se generan datos simulados."
+        "+ calicatas CR, y Thiessen con calicatas CR. No se generan datos simulados."
     )
 
     col1, col2 = st.columns([1, 1])
@@ -1970,10 +2318,22 @@ def main():
                     "El compuesto de suelo descubierto prioriza estacion seca "
                     "con meses automaticos, manuales o el calendario fijo Centroamerica."
                 )
-        st.info(
-            f"La corrida necesita conexion a {source_config['network_host']}. Si la fuente real no "
-            "responde, el proceso se detiene en lugar de inventar datos."
-        )
+        if source_config.get("reader") == "thiessen_calicatas":
+            st.warning(
+                "Metodo Thiessen: cada poligono toma la textura de la calicata "
+                "mas cercana en distancia euclidiana. Es util para ver areas de "
+                "influencia de muestras existentes, pero no modela transiciones "
+                "graduales ni sustituye interpolacion geoestadistica."
+            )
+            st.info(
+                f"La corrida usa {source_config['network_host']}. "
+                "Si no hay suficientes calicatas cercanas al AOI, el proceso se detiene."
+            )
+        else:
+            st.info(
+                f"La corrida necesita conexion a {source_config['network_host']}. Si la fuente real no "
+                "responde, el proceso se detiene en lugar de inventar datos."
+            )
 
         current_job = get_processing_job(st.session_state.processing_job_id)
         job_running = bool(current_job and current_job["state"] == "running")
@@ -2048,6 +2408,15 @@ def main():
                     "Consistencia intervalo 68%: "
                     f"{summary['stable_pixels']:,} de {summary['valid_pixels']:,} pixeles "
                     f"({summary['stable_pixels_percent']}%)."
+                )
+            thiessen_summary = result.get("thiessen_summary")
+            if thiessen_summary:
+                st.write(
+                    "Thiessen calicatas CR: "
+                    f"{thiessen_summary['calicatas_affecting_aoi']:,} calicatas "
+                    "con celdas que afectan el poligono; "
+                    f"{thiessen_summary['thiessen_polygon_count']:,} poligonos recortados; "
+                    f"buffer={thiessen_summary['buffer_km']} km."
                 )
             sentinel_uncertainty = result["auxiliary_rasters"].get("sentinel_model_uncertainty")
             sentinel_bare = result["auxiliary_rasters"].get("sentinel_bare_observations")

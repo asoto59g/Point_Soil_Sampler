@@ -25,6 +25,7 @@ La app no genera datos simulados: si una fuente remota no responde o no existen 
 - Compara fuentes globales base: OpenLandMap-soildb 120 m, OpenLandMap-soildb 30 m y SoilGrids250m / ISRIC WCS.
 - Incluye un modo experimental Sentinel-2/1 + perfiles locales que entrena **3 `RandomForestRegressor` independientes** (arena/limo/arcilla, normalizados a 100%) con WoSIS y/o calicatas Costa Rica, covariables Sentinel-2 L2A (incluye red-edge), Sentinel-1 RTC (VV/VH) y DEM.
 - Agrega un modo experimental Vis-NIR/proxy calibrado solo con calicatas Costa Rica para preparar la integracion futura de reflectancias Vis-NIR o mosaicos de dron.
+- Agrega una opcion Thiessen/Voronoi con calicatas Costa Rica para delimitar areas de influencia de muestras fisicas que afectan el poligono de estudio.
 - Exporta capas auxiliares de consistencia, observaciones Sentinel-2 de suelo descubierto, score de suelo descubierto e incertidumbre del modelo experimental.
 - Reporta validacion espacial por bloques (MAE/R² por fraccion) y las features mas importantes del RF dentro de la UI.
 
@@ -45,6 +46,7 @@ Resumen de lo incorporado en el modo experimental y de lo que el sistema **si** 
 | Bounds de entrenamiento | Union del envelope de perfiles + AOI al extraer DEM/S1 | Evita NaN en perfiles del buffer y corridas con 0 filas validas en AOIs pequenos |
 | Suelo descubierto | Prioridad estacion seca dinamica (WorldClim/CHIRPS o selector manual) + umbrales NDVI/NDWI/BSI estrictos | Adapta meses secos al AOI en cualquier region; override manual disponible |
 | Validacion | CV espacial por bloques: MAE ± std entre folds, R² y top features en la UI | Diagnostico exploratorio; no es certificacion de exactitud de campo |
+| Thiessen calicatas CR | Voronoi desde calicatas 0-30 cm que intersectan el AOI | Delimita areas de influencia de muestras existentes sin interpolar gradientes |
 | Operacion / smoke | Variables de entorno para limitar escenas, arboles RF y escenas S1 | Acelera pruebas E2E sin cambiar el codigo |
 
 ### Vector de features del RF experimental (50)
@@ -60,6 +62,7 @@ Resumen de lo incorporado en el modo experimental y de lo que el sistema **si** 
 - Comparacion entre OpenLandMap, SoilGrids y el modelo experimental Sentinel + perfiles.
 - Uso tipico en Costa Rica con calicatas locales + DEM nacional; tambien operable fuera de CR con WoSIS + Copernicus GLO-30.
 - Prediccion experimental a **20 m** solo sobre pixeles clasificados como suelo descubierto dentro del poligono.
+- Delimitacion Thiessen de areas de influencia de calicatas CR que afectan el poligono, con GeoJSON vectorial y raster de compatibilidad.
 - Export GIS (raster, GeoJSON, CSV, metadata) y capas auxiliares de calidad/incertidumbre.
 
 ### Fuera de alcance (que no cubre)
@@ -168,6 +171,16 @@ Opcion experimental separada para explorar el flujo fotografia/dron + Sentinel-2
 - Salida: raster de textura a 20 m, zonas texturales y puntos de muestreo.
 - Alcance: no usa todavia espectros Vis-NIR de laboratorio, camara hiperespectral ni fotos de dron cargadas por el usuario. Queda preparado como ruta operativa para incorporar esas reflectancias cuando existan datos locales calibrados.
 
+### Thiessen calicatas Costa Rica
+
+Opcion vectorial para usar directamente las calicatas Costa Rica 0-30 cm. La app genera poligonos de Thiessen/Voronoi con las calicatas del buffer de 250 km, conserva las celdas que intersectan el poligono de estudio y las recorta al AOI.
+
+- Entrada: `Calicatas_01_02_21_Costa_Rica.csv` con coordenadas, arena, limo y arcilla.
+- Textura: cada celda toma las fracciones medidas de su calicata generadora y se clasifica con USDA.
+- Salida: `poligonos_thiessen_calicatas.geojson`, `zonas_texturales.geojson`, puntos de muestreo y raster de compatibilidad a 30 m.
+- Atributos: `calicata_id`, `profile_id`, arena/limo/arcilla, coordenada de la calicata, si la calicata cae dentro del AOI y distancia al poligono.
+- Alcance: delimita areas de influencia por distancia; no interpola gradientes, no usa covariables ambientales y no reemplaza kriging u otra interpolacion geoestadistica.
+
 ## Datos De Entrada Y Formatos Soportados
 
 - Poligono dibujado en el mapa de la app.
@@ -183,7 +196,7 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-La app requiere conexion a internet para leer `s3.opengeohub.org`, `maps.isric.org` y, en el modo experimental, `planetarycomputer.microsoft.com` y (para DEM de Costa Rica) el MDE publico en Google Drive usado por [Runoff_CRC](https://github.com/asoto59g/Runoff_CRC).
+La app requiere conexion a internet para leer `s3.opengeohub.org`, `maps.isric.org` y, en el modo experimental, `planetarycomputer.microsoft.com` y (para DEM de Costa Rica) el MDE publico en Google Drive usado por [Runoff_CRC](https://github.com/asoto59g/Runoff_CRC). La opcion Thiessen usa el archivo local `Calicatas_01_02_21_Costa_Rica.csv`.
 
 Las corridas largas se ejecutan como procesos en segundo plano dentro del servidor Streamlit. Si el navegador se desconecta temporalmente, por ejemplo al apagar la pantalla, el proceso puede continuar mientras el equipo y el servidor Streamlit sigan activos.
 
@@ -235,6 +248,8 @@ Cada corrida crea una carpeta en `salidas/muestreo_YYYYMMDD_HHMMSS/` con:
 - `raster_textura_250m.tif` para SoilGrids250m
 - `raster_textura_20m_sentinel_wosis.tif` para el modo experimental Sentinel-2/1 + perfiles
 - `raster_textura_20m_visnir_calicatas.tif` para el modo experimental Vis-NIR/proxy + calicatas CR
+- `raster_textura_thiessen_calicatas_cr.tif` para la rasterizacion de Thiessen calicatas CR
+- `poligonos_thiessen_calicatas.geojson` cuando se usa Thiessen calicatas CR
 - `consistencia_intervalo_68_120m.tif` cuando se usa OpenLandMap-soildb 120 m
 - `consistencia_intervalo_68_120m_alineado_30m.tif` cuando se usa OpenLandMap-soildb 30 m
 - `sentinel_suelo_descubierto_observaciones.tif` cuando se usa un modo experimental Sentinel/Vis-NIR proxy
@@ -280,6 +295,7 @@ Cada punto se ubica en el centroide del poligono textural correspondiente. El CS
 - Sentinel-2 observa principalmente la superficie; no garantiza representar todo el intervalo 0-30 cm.
 - Humedad, rastrojo, sombra, residuos de cultivo, nubosidad y cobertura vegetal pueden sesgar la estimacion.
 - El modo Sentinel experimental depende de que existan suficientes perfiles (WoSIS y/o calicatas CR) y pixeles Sentinel-2 de suelo descubierto.
+- Thiessen con calicatas CR representa areas de influencia por cercania; no estima transiciones graduales ni incertidumbre espacial.
 - En AOIs muy pequenos o con pocos perfiles validos, el CV espacial puede mostrar MAE alto o R² negativo; eso es senal de incertidumbre, no un fallo silencioso.
 - Si el mosaico DEM CR no cubre el extent de entrenamiento (demasiadas teselas), el pipeline puede caer a Copernicus GLO-30 automaticamente.
 - Las capas remotas pueden cambiar, quedar temporalmente fuera de servicio o limitar respuestas.
@@ -300,6 +316,7 @@ Completado recientemente:
 - [x] Correccion de bounds DEM/S1 para perfiles del buffer.
 - [x] Caps por variables de entorno para smoke/E2E.
 - [x] Estacion seca global por WorldClim/CHIRPS + selector manual en Streamlit.
+- [x] Poligonos Thiessen/Voronoi desde calicatas CR que afectan el AOI.
 
 Pendiente:
 
