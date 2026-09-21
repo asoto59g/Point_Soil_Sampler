@@ -22,8 +22,9 @@ La app no genera datos simulados: si una fuente remota no responde o no existen 
 
 - Integra una interfaz Streamlit con fuentes globales de textura y salidas GIS listas para revision.
 - Clasifica textura USDA a partir de fracciones normalizadas de arena, limo y arcilla.
-- Compara fuentes globales base: OpenLandMap-soildb 120 m y SoilGrids250m / ISRIC WCS.
+- Compara fuentes globales base: OpenLandMap-soildb 120 m, OpenLandMap-soildb 30 m y SoilGrids250m / ISRIC WCS.
 - Incluye un modo experimental Sentinel-2/1 + perfiles locales que entrena **3 `RandomForestRegressor` independientes** (arena/limo/arcilla, normalizados a 100%) con WoSIS y/o calicatas Costa Rica, covariables Sentinel-2 L2A (incluye red-edge), Sentinel-1 RTC (VV/VH) y DEM.
+- Agrega un modo experimental Vis-NIR/proxy calibrado solo con calicatas Costa Rica para preparar la integracion futura de reflectancias Vis-NIR o mosaicos de dron.
 - Exporta capas auxiliares de consistencia, observaciones Sentinel-2 de suelo descubierto, score de suelo descubierto e incertidumbre del modelo experimental.
 - Reporta validacion espacial por bloques (MAE/R² por fraccion) y las features mas importantes del RF dentro de la UI.
 
@@ -117,6 +118,10 @@ Fuente predeterminada. Usa COGs globales de OpenLandMap-soildb para arena, limo 
 
 La textura USDA principal se calcula con las capas `mean`. La app tambien lee `p0.16` y `p0.84` y exporta una mascara `consistencia_intervalo_68_120m.tif`: valor `1` cuando la clase USDA calculada con la media coincide con la clase calculada desde ambos extremos del intervalo, y `0` cuando no coincide o no hay dato. Esta mascara es un indicador derivado de consistencia, no una probabilidad oficial de clase.
 
+### OpenLandMap-soildb 30 m
+
+Fuente adicional para comprobar y comparar contra OpenLandMap 120 m. Usa las capas `mean` reales de 30 m publicadas en el catalogo OpenLandMap-soildb 2026 para arena, limo y arcilla 0-30 cm / 2020-2022. Como los intervalos `p0.16` y `p0.84` estan disponibles a 120 m para estas variables, la app los alinea a la grilla de 30 m y exporta `consistencia_intervalo_68_120m_alineado_30m.tif`.
+
 ### SoilGrids250m / ISRIC WCS
 
 Fuente alternativa global para comparar resultados. Usa el servicio WCS de ISRIC SoilGrids:
@@ -153,6 +158,15 @@ Modo experimental para comparar contra las fuentes globales base. Entrena tres `
 - Las coordenadas `LON`/`LAT` ya no se usan como features, para forzar aprendizaje espectro + topografia + radar.
 - Validacion: calcula metricas internas con validacion espacial por bloques (MAE y R² por fraccion, desviacion entre folds) cuando hay suficientes perfiles distribuidos; la app muestra un panel con MAE arena/limo/arcilla y las features mas importantes del RF.
 - Postproceso: suaviza ligeramente las fracciones arena/limo/arcilla antes de clasificar USDA para reducir ruido salpicado de pixeles aislados.
+
+### Experimental Vis-NIR/proxy + calicatas CR
+
+Opcion experimental separada para explorar el flujo fotografia/dron + Sentinel-2 + muestras fisicas. En la version actual, la calibracion usa obligatoriamente las calicatas Costa Rica como verdad de campo y Sentinel-2 visible/NIR/SWIR como proxy espectral de suelo descubierto.
+
+- Entrenamiento: solo calicatas Costa Rica 0-30 cm (`Solo calicatas Costa Rica`), sin WoSIS.
+- Covariables: mismas bandas/indices espectrales Sentinel-2, suelo descubierto, Sentinel-1 y DEM del modo experimental.
+- Salida: raster de textura a 20 m, zonas texturales y puntos de muestreo.
+- Alcance: no usa todavia espectros Vis-NIR de laboratorio, camara hiperespectral ni fotos de dron cargadas por el usuario. Queda preparado como ruta operativa para incorporar esas reflectancias cuando existan datos locales calibrados.
 
 ## Datos De Entrada Y Formatos Soportados
 
@@ -216,13 +230,16 @@ El mapa de la app permite cargar o dibujar el poligono, ejecutar la clasificacio
 
 Cada corrida crea una carpeta en `salidas/muestreo_YYYYMMDD_HHMMSS/` con:
 
-- `raster_textura_120m.tif` para OpenLandMap-soildb
+- `raster_textura_120m.tif` para OpenLandMap-soildb 120 m
+- `raster_textura_30m.tif` para OpenLandMap-soildb 30 m
 - `raster_textura_250m.tif` para SoilGrids250m
 - `raster_textura_20m_sentinel_wosis.tif` para el modo experimental Sentinel-2/1 + perfiles
-- `consistencia_intervalo_68_120m.tif` cuando se usa OpenLandMap-soildb
-- `sentinel_suelo_descubierto_observaciones.tif` cuando se usa el modo experimental
-- `sentinel_suelo_descubierto_score.tif` cuando se usa el modo experimental
-- `incertidumbre_modelo_sentinel_wosis.tif` cuando se usa el modo experimental
+- `raster_textura_20m_visnir_calicatas.tif` para el modo experimental Vis-NIR/proxy + calicatas CR
+- `consistencia_intervalo_68_120m.tif` cuando se usa OpenLandMap-soildb 120 m
+- `consistencia_intervalo_68_120m_alineado_30m.tif` cuando se usa OpenLandMap-soildb 30 m
+- `sentinel_suelo_descubierto_observaciones.tif` cuando se usa un modo experimental Sentinel/Vis-NIR proxy
+- `sentinel_suelo_descubierto_score.tif` cuando se usa un modo experimental Sentinel/Vis-NIR proxy
+- `incertidumbre_modelo_sentinel_wosis.tif` cuando se usa un modo experimental Sentinel/Vis-NIR proxy
 - `zonas_texturales.geojson`
 - `poligonos_muestreo.geojson`
 - `puntos_muestreo.geojson`

@@ -20,6 +20,7 @@ from rasterio.errors import RasterioIOError
 from rasterio.features import shapes
 from rasterio.io import MemoryFile
 from rasterio.mask import mask as raster_mask
+from rasterio.warp import Resampling, reproject
 from rasterio.windows import from_bounds
 from shapely.geometry import mapping, shape
 
@@ -112,7 +113,7 @@ USDA_COLORS = {
     NODATA_CLASS: "#cccccc",
 }
 
-OPENLANDMAP_FRACTION_COGS = {
+OPENLANDMAP_120M_FRACTION_COGS = {
     "sand": {
         "label": "arena",
         "urls": {
@@ -139,12 +140,60 @@ OPENLANDMAP_FRACTION_COGS = {
     },
 }
 
+OPENLANDMAP_30M_FRACTION_COGS = {
+    "sand": {
+        "label": "arena",
+        "urls": {
+            "mean": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/sand.tot_iso.11277.2020.wpct_m_30m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+            "p16": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/sand.tot_iso.11277.2020.wpct_p16_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+            "p84": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/sand.tot_iso.11277.2020.wpct_p84_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+        },
+    },
+    "silt": {
+        "label": "limo",
+        "urls": {
+            "mean": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/silt.tot_iso.11277.2020.wpct_m_30m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+            "p16": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/silt.tot_iso.11277.2020.wpct_p16_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+            "p84": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/silt.tot_iso.11277.2020.wpct_p84_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+        },
+    },
+    "clay": {
+        "label": "arcilla",
+        "urls": {
+            "mean": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/clay.tot_iso.11277.2020.wpct_m_30m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+            "p16": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/clay.tot_iso.11277.2020.wpct_p16_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+            "p84": "https://s3.opengeohub.org/global-soil/global_soil_props_v20250523/clay.tot_iso.11277.2020.wpct_p84_120m_b0cm..30cm_20200101_20221231_g_epsg.4326_v20250523.tif",
+        },
+    },
+}
+
+OPENLANDMAP_STAT_LABELS = {
+    "mean": "media",
+    "p16": "p0.16",
+    "p84": "p0.84",
+}
+OPENLANDMAP_120M_STAT_RESOLUTIONS = {
+    "mean": "120 m",
+    "p16": "120 m",
+    "p84": "120 m",
+}
+OPENLANDMAP_30M_STAT_RESOLUTIONS = {
+    "mean": "30 m",
+    "p16": "120 m",
+    "p84": "120 m",
+}
 OPENLANDMAP_INTERVAL_CONFIDENCE_PERCENT = 68
 OPENLANDMAP_MIN_CERTAINTY_PERCENT = 60
-OPENLANDMAP_SOURCE_DESCRIPTION = (
+OPENLANDMAP_120M_SOURCE_DESCRIPTION = (
     "OpenLandMap-soildb COGs: fracciones arena/limo/arcilla, media "
     "2020-2022, profundidad 0-30 cm, resolucion 120 m, EPSG:4326, "
     "con intervalos p0.16/p0.84 de 68% (>60%)."
+)
+OPENLANDMAP_30M_SOURCE_DESCRIPTION = (
+    "OpenLandMap-soildb COGs: fracciones arena/limo/arcilla, media "
+    "2020-2022 a 30 m, profundidad 0-30 cm, EPSG:4326, con intervalos "
+    "p0.16/p0.84 a 120 m alineados a la grilla de salida para evaluar "
+    "consistencia de 68% (>60%)."
 )
 OPENLANDMAP_CATALOG_URL = (
     "https://raw.githubusercontent.com/openlandmap/soildb/main/tables/"
@@ -168,6 +217,14 @@ SENTINEL_WOSIS_CATALOG_URL = (
     "https://planetarycomputer.microsoft.com/dataset/sentinel-2-l2a; "
     "https://planetarycomputer.microsoft.com/dataset/sentinel-1-rtc"
 )
+VISNIR_CALICATAS_SOURCE_DESCRIPTION = (
+    "Modo experimental Vis-NIR/proxy: calibra un modelo local solo con calicatas "
+    "Costa Rica (arena/limo/arcilla 0-30 cm) y covariables espectrales "
+    "Sentinel-2 visible/NIR/SWIR de suelo descubierto, mas Sentinel-1 RTC y "
+    "relieve DEM, para predecir textura a 20 m. No usa espectros Vis-NIR de "
+    "laboratorio ni fotos de dron directamente; es una base operativa para "
+    "comparar y extender cuando existan esas mediciones."
+)
 SOILGRIDS_CRS = "ESRI:54052"
 SOILGRIDS_CRS_WKT = (
     'PROJCS["World_Goode_Homolosine_Land",'
@@ -190,11 +247,28 @@ SOILGRIDS_LAYER_TEMPLATE = "https://maps.isric.org/mapserv?map=/map/{property}.m
 DATA_SOURCES = {
     "openlandmap": {
         "name": "OpenLandMap-soildb 120 m (PI 68%)",
-        "description": OPENLANDMAP_SOURCE_DESCRIPTION,
+        "description": OPENLANDMAP_120M_SOURCE_DESCRIPTION,
         "catalog": OPENLANDMAP_CATALOG_URL,
-        "layers": OPENLANDMAP_FRACTION_COGS,
+        "layers": OPENLANDMAP_120M_FRACTION_COGS,
         "resolution_label": "120 m",
         "resolution_slug": "120m",
+        "reader": "openlandmap",
+        "stat_resolutions": OPENLANDMAP_120M_STAT_RESOLUTIONS,
+        "certainty_filename": "consistencia_intervalo_68_120m.tif",
+        "certainty_threshold": OPENLANDMAP_MIN_CERTAINTY_PERCENT,
+        "interval_confidence": OPENLANDMAP_INTERVAL_CONFIDENCE_PERCENT,
+        "network_host": "s3.opengeohub.org",
+    },
+    "openlandmap_30": {
+        "name": "OpenLandMap-soildb 30 m (PI 68% a 120 m)",
+        "description": OPENLANDMAP_30M_SOURCE_DESCRIPTION,
+        "catalog": OPENLANDMAP_CATALOG_URL,
+        "layers": OPENLANDMAP_30M_FRACTION_COGS,
+        "resolution_label": "30 m",
+        "resolution_slug": "30m",
+        "reader": "openlandmap",
+        "stat_resolutions": OPENLANDMAP_30M_STAT_RESOLUTIONS,
+        "certainty_filename": "consistencia_intervalo_68_120m_alineado_30m.tif",
         "certainty_threshold": OPENLANDMAP_MIN_CERTAINTY_PERCENT,
         "interval_confidence": OPENLANDMAP_INTERVAL_CONFIDENCE_PERCENT,
         "network_host": "s3.opengeohub.org",
@@ -226,6 +300,26 @@ DATA_SOURCES = {
         "resolution_slug": "20m_sentinel_wosis",
         "network_host": "maps.isric.org, planetarycomputer.microsoft.com y drive.google.com (DEM CR)",
         "experimental": True,
+        "reader": "sentinel_wosis",
+    },
+    "visnir_calicatas": {
+        "name": "Experimental Vis-NIR/proxy + calicatas CR (20 m)",
+        "description": VISNIR_CALICATAS_SOURCE_DESCRIPTION,
+        "catalog": SENTINEL_WOSIS_CATALOG_URL,
+        "layers": {
+            "calibration": "Calicatas Costa Rica arena/limo/arcilla 0-30 cm",
+            "spectral_proxy": "Sentinel-2 visible/NIR/SWIR multitemporal bare-soil composite",
+            "radar": "Sentinel-1 RTC VV/VH",
+            "dem": "DEM CR (Runoff Drive) o Copernicus GLO-30",
+            "model": "RandomForestRegressor experimental calibrado con calicatas CR",
+        },
+        "resolution_label": "20 m",
+        "resolution_slug": "20m_visnir_calicatas",
+        "network_host": "planetarycomputer.microsoft.com y drive.google.com (DEM CR)",
+        "experimental": True,
+        "reader": "sentinel_wosis",
+        "fixed_training_source": TRAINING_SOURCE_CALICATAS_CR,
+        "visnir_proxy": True,
     },
 }
 DEFAULT_SOURCE_KEY = "openlandmap"
@@ -661,27 +755,48 @@ def check_pixel_limit(pixel_count, width, height):
         raise ValueError("El poligono es demasiado pequeno.")
 
 
-def read_openlandmap_fraction_rasters(poly_geom, status_box=None):
+def align_band_to_grid(band, src_transform, src_crs, dst_shape, dst_transform, dst_crs):
+    source = np.ma.filled(band, np.nan).astype("float32")
+    destination = np.full(dst_shape, np.nan, dtype="float32")
+    reproject(
+        source=source,
+        destination=destination,
+        src_transform=src_transform,
+        src_crs=src_crs,
+        src_nodata=np.nan,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        dst_nodata=np.nan,
+        resampling=Resampling.nearest,
+    )
+    return np.ma.masked_invalid(destination)
+
+
+def read_openlandmap_fraction_rasters(poly_geom, source_config, status_box=None):
     arrays = {}
     intervals = {}
     out_transform = None
     out_crs = None
     out_shape = None
     pixel_count = None
+    stat_resolutions = source_config["stat_resolutions"]
 
     with rasterio.Env(**GDAL_HTTP_OPTIONS):
-        for key, layer in OPENLANDMAP_FRACTION_COGS.items():
+        for key, layer in source_config["layers"].items():
             intervals[key] = {}
 
             for stat_key, url in layer["urls"].items():
+                stat_label = OPENLANDMAP_STAT_LABELS.get(stat_key, stat_key)
+                stat_resolution = stat_resolutions.get(stat_key, "desconocida")
                 if status_box:
                     status_box.info(
-                        f"Leyendo {layer['label']} {stat_key} desde OpenLandMap-soildb 120 m..."
+                        f"Leyendo {layer['label']} {stat_label} desde "
+                        f"OpenLandMap-soildb {stat_resolution}..."
                     )
 
                 try:
                     with rasterio.open(url) as src:
-                        if pixel_count is None:
+                        if stat_key == "mean" and pixel_count is None:
                             pixel_count, width, height = estimate_window_pixels(src, poly_geom)
                             check_pixel_limit(pixel_count, width, height)
 
@@ -694,13 +809,41 @@ def read_openlandmap_fraction_rasters(poly_geom, status_box=None):
                         )
                         band = np.ma.masked_invalid(data[0].astype("float32"))
 
-                        if out_shape is None:
-                            out_shape = band.shape
-                            out_transform = transform
-                            out_crs = src.crs
-                        elif band.shape != out_shape or not transform.almost_equals(out_transform):
+                        if stat_key == "mean":
+                            if out_shape is None:
+                                out_shape = band.shape
+                                out_transform = transform
+                                out_crs = src.crs
+                            elif (
+                                band.shape != out_shape
+                                or not transform.almost_equals(out_transform)
+                                or src.crs != out_crs
+                            ):
+                                raise RuntimeError(
+                                    "Las capas medias de arena, limo y arcilla no estan alineadas."
+                                )
+                        else:
+                            if out_shape is None or out_transform is None or out_crs is None:
+                                raise RuntimeError(
+                                    "La media OpenLandMap debe leerse antes de los intervalos."
+                                )
+                            if (
+                                band.shape != out_shape
+                                or not transform.almost_equals(out_transform)
+                                or src.crs != out_crs
+                            ):
+                                band = align_band_to_grid(
+                                    band,
+                                    transform,
+                                    src.crs,
+                                    out_shape,
+                                    out_transform,
+                                    out_crs,
+                                )
+
+                        if band.shape != out_shape:
                             raise RuntimeError(
-                                "Los rasters de arena, limo y arcilla no estan alineados."
+                                "No se pudo alinear el raster OpenLandMap a la grilla base."
                             )
 
                         intervals[key][stat_key] = band
@@ -731,21 +874,35 @@ def read_openlandmap_fraction_rasters(poly_geom, status_box=None):
     valid = mean_texture > 0
     stable = valid & (lower_texture == mean_texture) & (upper_texture == mean_texture)
     stable_pct = float(np.count_nonzero(stable) / np.count_nonzero(valid) * 100.0) if np.any(valid) else 0.0
+    mean_resolution = stat_resolutions["mean"]
+    interval_resolution = stat_resolutions["p16"]
+    if mean_resolution == interval_resolution:
+        certainty_description = (
+            "Mascara derivada: 1 cuando la clase USDA calculada con media "
+            f"{mean_resolution} coincide con las clases calculadas usando "
+            "p0.16 y p0.84. El intervalo fuente es 68% (>60%); no es una "
+            "probabilidad oficial de clase."
+        )
+    else:
+        certainty_description = (
+            "Mascara derivada: 1 cuando la clase USDA calculada con media "
+            f"{mean_resolution} coincide con las clases calculadas usando "
+            f"p0.16 y p0.84 de {interval_resolution} alineados a la grilla "
+            "de salida. El intervalo fuente es 68% (>60%); no es una "
+            "probabilidad oficial de clase."
+        )
     auxiliary_rasters = {
         "certainty_mask": {
-            "filename": "consistencia_intervalo_68_120m.tif",
+            "filename": source_config["certainty_filename"],
             "array": stable.astype("uint8"),
             "dtype": "uint8",
             "nodata": 0,
-            "description": (
-                "Mascara derivada: 1 cuando la clase USDA calculada con media "
-                "coincide con las clases calculadas usando p0.16 y p0.84. "
-                "El intervalo fuente es 68% (>60%); no es una probabilidad "
-                "oficial de clase."
-            ),
+            "description": certainty_description,
             "summary": {
                 "interval_confidence_percent": OPENLANDMAP_INTERVAL_CONFIDENCE_PERCENT,
                 "minimum_requested_certainty_percent": OPENLANDMAP_MIN_CERTAINTY_PERCENT,
+                "mean_resolution": mean_resolution,
+                "interval_resolution": interval_resolution,
                 "valid_pixels": int(np.count_nonzero(valid)),
                 "stable_pixels": int(np.count_nonzero(stable)),
                 "stable_pixels_percent": round(stable_pct, 2),
@@ -882,17 +1039,23 @@ def read_soil_fraction_rasters(
     dry_season_months=None,
     dry_season_n_driest=DEFAULT_N_DRIEST_MONTHS,
 ):
-    if source_key == "openlandmap":
-        return read_openlandmap_fraction_rasters(poly_geom, status_box)
+    source_config = get_source_config(source_key)
+    if source_config.get("reader") == "openlandmap":
+        return read_openlandmap_fraction_rasters(poly_geom, source_config, status_box)
     if source_key == "soilgrids":
         return read_soilgrids_fraction_rasters(poly_geom, status_box)
-    if source_key == "sentinel_wosis":
+    if source_config.get("reader") == "sentinel_wosis":
         reader = load_experimental_sentinel_reader()
+        selected_training_source = (
+            source_config.get("fixed_training_source")
+            or training_source
+            or DEFAULT_TRAINING_SOURCE
+        )
         return reader(
             poly_geom,
             status_box=status_box,
             max_pixels=MAX_PIXELS,
-            training_source=training_source or DEFAULT_TRAINING_SOURCE,
+            training_source=selected_training_source,
             dry_season_mode=dry_season_mode,
             dry_season_months=dry_season_months,
             dry_season_n_driest=dry_season_n_driest,
@@ -1627,8 +1790,9 @@ def main():
         "textura USDA calculada desde fracciones reales de arena, limo y arcilla."
     )
     st.caption(
-        "Fuentes reales disponibles: OpenLandMap-soildb 120 m, SoilGrids250m / "
-        "ISRIC WCS y modo experimental Sentinel-2 + WoSIS. No se generan datos simulados."
+        "Fuentes reales disponibles: OpenLandMap-soildb 120 m y 30 m, SoilGrids250m / "
+        "ISRIC WCS, modo experimental Sentinel-2 + WoSIS y modo Vis-NIR/proxy "
+        "+ calicatas CR. No se generan datos simulados."
     )
 
     col1, col2 = st.columns([1, 1])
@@ -1679,23 +1843,30 @@ def main():
                 load_experimental_sentinel_reader()
             except Exception as exc:
                 st.error(str(exc))
-            training_options = list(TRAINING_SOURCE_OPTIONS.keys())
-            selected_training = st.selectbox(
-                "Perfiles de entrenamiento",
-                training_options,
-                index=training_options.index(st.session_state.training_source)
-                if st.session_state.training_source in TRAINING_SOURCE_OPTIONS
-                else training_options.index(DEFAULT_TRAINING_SOURCE),
-                format_func=lambda key: TRAINING_SOURCE_OPTIONS[key],
-                help=(
-                    "Las calicatas Costa Rica aportan ~1,600 perfiles 0-30 cm con "
-                    "arena/limo/arcilla. Se filtran al buffer de 250 km y se usan "
-                    "hasta ~400 perfiles cercanos al poligono."
-                ),
-            )
-            if selected_training != st.session_state.training_source:
-                st.session_state.training_source = selected_training
-                st.session_state.result = None
+            fixed_training_source = source_config.get("fixed_training_source")
+            if fixed_training_source:
+                st.info(
+                    "Calibracion fijada a: "
+                    f"{TRAINING_SOURCE_OPTIONS[fixed_training_source]}."
+                )
+            else:
+                training_options = list(TRAINING_SOURCE_OPTIONS.keys())
+                selected_training = st.selectbox(
+                    "Perfiles de entrenamiento",
+                    training_options,
+                    index=training_options.index(st.session_state.training_source)
+                    if st.session_state.training_source in TRAINING_SOURCE_OPTIONS
+                    else training_options.index(DEFAULT_TRAINING_SOURCE),
+                    format_func=lambda key: TRAINING_SOURCE_OPTIONS[key],
+                    help=(
+                        "Las calicatas Costa Rica aportan ~1,600 perfiles 0-30 cm con "
+                        "arena/limo/arcilla. Se filtran al buffer de 250 km y se usan "
+                        "hasta ~400 perfiles cercanos al poligono."
+                    ),
+                )
+                if selected_training != st.session_state.training_source:
+                    st.session_state.training_source = selected_training
+                    st.session_state.result = None
             dry_mode_options = {
                 "auto": "Automatico (WorldClim / CHIRPS)",
                 "manual": "Manual (selector de meses)",
@@ -1767,24 +1938,38 @@ def main():
                     f"{format_month_list(DEFAULT_DRY_SEASON_MONTHS)}."
                 )
 
-            st.warning(
-                "Modo experimental: entrena 3 Random Forest (arena/limo/arcilla) con "
-                "perfiles WoSIS y/o calicatas Costa Rica, Sentinel-2 de suelo "
-                "descubierto, Sentinel-1 RTC (VV/VH) y DEM (MDE publico CR via "
-                "Google Drive en Costa Rica; Copernicus GLO-30 fuera de CR). "
-                "Normaliza fracciones a 100%. Puede ser lento y no sustituye "
-                "muestreo de campo."
-            )
-            st.caption(
-                "Recomendacion: usarlo para comparacion exploratoria contra "
-                "OpenLandMap/SoilGrids y revisar la incertidumbre exportada. "
-                "Las features LON/LAT se reemplazaron por elevacion, pendiente, "
-                "aspecto y curvatura. Cada fraccion tiene su propio RF; "
-                "covariables incluyen red-edge Sentinel-2 (B05-B07, B8A, NDRE) "
-                "y backscatter Sentinel-1 RTC (VV_DB, VH_DB, VV_VH_DB). "
-                "El compuesto de suelo descubierto prioriza estacion seca "
-                "(dic-abr) y umbrales NDVI/BSI mas estrictos."
-            )
+            if source_config.get("visnir_proxy"):
+                st.warning(
+                    "Modo experimental Vis-NIR/proxy: usa calicatas Costa Rica como "
+                    "verdad de campo y Sentinel-2 visible/NIR/SWIR como proxy espectral, "
+                    "con covariables auxiliares Sentinel-1 y DEM. "
+                    "No reemplaza una calibracion con espectros Vis-NIR de laboratorio "
+                    "o imagenes de dron medidas localmente."
+                )
+                st.caption(
+                    "Uso recomendado: comparar contra OpenLandMap/Sentinel y preparar "
+                    "la arquitectura para incorporar reflectancias Vis-NIR o mosaicos "
+                    "de dron cuando existan."
+                )
+            else:
+                st.warning(
+                    "Modo experimental: entrena 3 Random Forest (arena/limo/arcilla) con "
+                    "perfiles WoSIS y/o calicatas Costa Rica, Sentinel-2 de suelo "
+                    "descubierto, Sentinel-1 RTC (VV/VH) y DEM (MDE publico CR via "
+                    "Google Drive en Costa Rica; Copernicus GLO-30 fuera de CR). "
+                    "Normaliza fracciones a 100%. Puede ser lento y no sustituye "
+                    "muestreo de campo."
+                )
+                st.caption(
+                    "Recomendacion: usarlo para comparacion exploratoria contra "
+                    "OpenLandMap/SoilGrids y revisar la incertidumbre exportada. "
+                    "Las features LON/LAT se reemplazaron por elevacion, pendiente, "
+                    "aspecto y curvatura. Cada fraccion tiene su propio RF; "
+                    "covariables incluyen red-edge Sentinel-2 (B05-B07, B8A, NDRE) "
+                    "y backscatter Sentinel-1 RTC (VV_DB, VH_DB, VV_VH_DB). "
+                    "El compuesto de suelo descubierto prioriza estacion seca "
+                    "con meses automaticos, manuales o el calendario fijo Centroamerica."
+                )
         st.info(
             f"La corrida necesita conexion a {source_config['network_host']}. Si la fuente real no "
             "responde, el proceso se detiene en lugar de inventar datos."
@@ -1798,11 +1983,12 @@ def main():
             else:
                 try:
                     validate_polygon(st.session_state.polygon_geojson)
-                    training_source = (
-                        st.session_state.training_source
-                        if source_config.get("experimental")
-                        else None
-                    )
+                    training_source = None
+                    if source_config.get("experimental"):
+                        training_source = (
+                            source_config.get("fixed_training_source")
+                            or st.session_state.training_source
+                        )
                     dry_season_mode = (
                         st.session_state.dry_season_mode
                         if source_config.get("experimental")
@@ -1949,11 +2135,12 @@ def main():
                         0,
                         f"entrenamiento={uncertainty_summary['training_source_label']}",
                     )
-                st.write(
-                    "Sentinel experimental: "
-                    + "; ".join(sentinel_details)
-                    + "."
+                detail_prefix = (
+                    "Vis-NIR/proxy experimental"
+                    if result.get("source_key") == "visnir_calicatas"
+                    else "Sentinel experimental"
                 )
+                st.write(f"{detail_prefix}: " + "; ".join(sentinel_details) + ".")
                 render_sentinel_spatial_cv_panel(uncertainty_summary)
                 if uncertainty_summary.get("model_quality_warning"):
                     st.warning(uncertainty_summary["model_quality_warning"])
